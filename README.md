@@ -21,17 +21,15 @@ This repo implements our paper: Yining Ma, Jingwen Li, Zhiguang Cao, Wen Song, L
 }
 ```
 
+# News 🎉
+You may be interested in our new approach called [NeuOpt](https://github.com/yining043/NeuOpt) (NeurIPS 2024) which learns to perform more efficient and flexible k-opt exchanges and explores both feasible and infeasible regions for effective constraint handling. You may also interested in our [N2S](https://github.com/yining043/PDP-N2S) (IJCAI 2022) which makes DACT more efficient for solving pickup and delivery problems (PDPs).
+
 
 # Jupyter Notebook
 We provide a Jupyter notebook to help you get started and understand our code. Please open the [Jupyter notebook](./Play_with_DACT.ipynb) for more details.
 
 Please note that in our implementation, the VRP solution is stored in a linked list format. Let us consider a TSP-20 solution [ 6 -> 17 -> 3 -> 9 -> 16 -> 4 -> 12 -> 0 -> 1 -> 5 -> 13 -> 19 -> 11 -> 18 -> 8 -> 14 -> 15 -> 7 -> 2 -> 10 -> 6], we would store this solution as rec = torch.tensor([[ 1, 5, 10, 9, 12, 13, 17, 2, 14, 16, 6, 18, 0, 19, 15, 7, 4, 3,8, 11]]),. Here, if rec[i] = j, it means the node i is connected to node j, i.e., edge i-j is in the solution. For example, edge 0-1, edge 1-5, edge 2-10 are in the solution, so we have rec[0]=1, rec[1]=5 and rec[2]=10.
 
-
-# One more thing
-You may be interested in our new approach called [N2S](https://github.com/yining043/PDP-N2S) (IJCAI 2022) which makes DACT more efficient for solving pickup and delivery problems (PDPs). And the proposed Synthetic Attention (Synth-Att) in N2S has the potential to improve the efficiency of DACT further.
-
-Paper: Yining Ma, Jingwen Li, Zhiguang Cao, Wen Song, Hongliang Guo, Yuejiao Gong and Yeow Meng Chee, “[Efficient Neural Neighborhood Search for Pickup and Delivery Problems](https://arxiv.org/abs/2204.11399),” in the 31st International Joint Conference on Artificial Intelligence (IJCAI 22), 2022.
 
 # Dependencies
 * Python>=3.6 (we test on Python 3.8.2)
