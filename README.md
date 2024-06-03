@@ -22,7 +22,7 @@ This repo implements our paper: Yining Ma, Jingwen Li, Zhiguang Cao, Wen Song, L
 ```
 
 # News 🎉
-You may be interested in our new approach called [NeuOpt](https://github.com/yining043/NeuOpt) (NeurIPS 2024) which learns to perform more efficient and flexible k-opt exchanges and explores both feasible and infeasible regions for effective constraint handling. You may also interested in our [N2S](https://github.com/yining043/PDP-N2S) (IJCAI 2022) which makes DACT more efficient for solving pickup and delivery problems (PDPs).
+You may be interested in our new approach called [NeuOpt](https://github.com/yining043/NeuOpt) (NeurIPS 2023) which learns to perform more efficient and flexible k-opt exchanges and explores both feasible and infeasible regions for effective constraint handling. You may also interested in our [N2S](https://github.com/yining043/PDP-N2S) (IJCAI 2022) which makes DACT more efficient for solving pickup and delivery problems (PDPs).
 
 
 # Jupyter Notebook
