@@ -1,0 +1,42 @@
+# configs/default.yaml — matches options.py defaults exactly
+
+problem:
+  graph_size: 20
+  capacity: 30       # auto: {20:30, 50:40, 100:50}
+
+architecture:
+  embedding_dim: 2
+  hidden_dim: 16
+  knn_k: 5
+  lambda_init: 0.1
+
+ppo:
+  K_epochs: 3
+  eps_clip: 0.2
+  gamma: 0.99
+  gae_lambda: 0.95
+  c1: 0.5
+  c2: 0.01
+
+training:
+  n_epochs: 100
+  epoch_size: 128000
+  batch_size: 256      # 256 for RTX 3050 4GB VRAM
+  lr_model: 1e-4
+  lr_critic: 1e-4
+  max_grad_norm: 1.0
+
+evaluation:
+  val_size: 10000
+  eval_batch_size: 256
+  decode_strategy: greedy
+
+clustering:
+  num_clusters: 0
+
+logging:
+  seed: 1234
+  run_name: qap_drl_run
+  output_dir: outputs
+  log_dir: logs
+  checkpoint_epochs: 1

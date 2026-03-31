@@ -1,0 +1,25 @@
+# Datasets (large .pkl files)
+cvrp-ppo/datasets/*.pkl
+
+# Training outputs (checkpoints, logs, images)
+cvrp-ppo/outputs/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Claude memory (local only)
+.claude/
+
+# Reference code (separate repo)
+ref_code/
