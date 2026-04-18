@@ -85,9 +85,13 @@ class QAPDecoder(nn.Module):
 
         all_actions   = []
         all_log_probs = []
-        step = 0
 
-        while not state["done"].all():
+        # Bounded loop: worst case ≈ N customers + N depot returns.
+        # Replaces `while not state["done"].all()` which syncs GPU→CPU every step.
+        max_steps = 3 * n_customers + 1
+        for step in range(max_steps):
+            if state["done"].all():
+                break
             log_probs, mask = self.forward(
                 state, psi_prime, knn_indices, step, n_customers
             )                                                          # [B, N+1]
@@ -104,7 +108,6 @@ class QAPDecoder(nn.Module):
             all_log_probs.append(log_p)
 
             state = env.step(state, action)
-            step += 1
 
         actions_t   = torch.stack(all_actions,   dim=1)                # [B, T]
         log_probs_t = torch.stack(all_log_probs, dim=1)                # [B, T]

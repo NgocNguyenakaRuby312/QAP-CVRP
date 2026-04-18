@@ -30,6 +30,7 @@ def cluster_instance(
             coords:  [Nk+1, 2]  depot (index 0) + cluster customers
             demands: [Nk+1]     depot demand + cluster demands
             indices: [Nk]       original customer indices (1-based)
+            centroid:[2]        geometric centroid of the cluster
 
     Note:
         After clustering, kNN must be recomputed per sub-problem (P10).
@@ -42,30 +43,41 @@ def cluster_instance(
     km = KMeans(n_clusters=n_clusters, n_init=10, random_state=0)
     labels = km.fit_predict(customer_coords)                           # [N]
 
-    depot_coord = coords[0:1]                                          # [1, 2]
+    depot_coord  = coords[0:1]                                         # [1, 2]
     depot_demand = demands[0:1]                                        # [1]
 
     sub_problems = []
     for k in range(n_clusters):
         # Customer indices in this cluster (0-based in customer array → 1-based in full)
         cust_mask = (labels == k)
-        cust_indices = torch.where(torch.tensor(cust_mask))[0] + 1     # 1-based
+        # FIX: build indices on the SAME device as coords to avoid CUDA/CPU mismatch
+        cust_indices = torch.where(
+            torch.tensor(cust_mask, device=device)
+        )[0] + 1                                                       # 1-based, on device
+
+        if len(cust_indices) == 0:
+            # Edge case: empty cluster (can happen with bad K-Means init)
+            continue
 
         # Build sub-problem: depot + cluster customers
         sub_coords = torch.cat([
             depot_coord,
             coords[cust_indices],
-        ], dim=0).to(device)                                           # [Nk+1, 2]
+        ], dim=0)                                                      # [Nk+1, 2]
 
         sub_demands = torch.cat([
             depot_demand,
             demands[cust_indices],
-        ], dim=0).to(device)                                           # [Nk+1]
+        ], dim=0)                                                      # [Nk+1]
+
+        # Centroid = mean of cluster customer coordinates (for visualisation / routing)
+        centroid = coords[cust_indices].mean(dim=0)                    # [2]
 
         sub_problems.append({
-            "coords":  sub_coords,
-            "demands": sub_demands,
-            "indices": cust_indices.to(device),                        # original 1-based indices
+            "coords":   sub_coords,
+            "demands":  sub_demands,
+            "indices":  cust_indices,                                  # original 1-based
+            "centroid": centroid,                                      # [2] geometric centre
         })
 
     return sub_problems

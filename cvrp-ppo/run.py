@@ -84,14 +84,7 @@ def greedy_eval(policy, env, coords, demands, capacity, device):
     })
     actions, _, _ = policy(state, env, deterministic=True)
 
-    # Tour length
-    T = actions.shape[1]
-    idx   = actions.unsqueeze(-1).expand(B, T, 2)
-    route = coords.to(device).gather(1, idx)
-    depot = coords[:, 0:1, :].to(device)
-    full  = torch.cat([depot, route, depot], dim=1)
-    dists = (full[:, 1:] - full[:, :-1]).norm(p=2, dim=-1).sum(-1)
-
+    dists = -env.get_reward(state, actions)                            # get_reward returns −distance
     feas = check_feasibility(actions, demands.to(device), capacity)
     return dists.mean().item(), feas
 
@@ -119,38 +112,59 @@ def main():
 
     # ── Validation data (fixed) ──────────────────────────────────────
     val_coords, val_demands, val_cap = generate_validation_set(
-        num_samples=min(opts.val_size, 256),
+        num_samples=min(opts.val_size, opts.eval_batch_size),
         graph_size=opts.graph_size,
         seed=opts.seed + 1,
         device=str(device),
     )
 
     # ── Model ────────────────────────────────────────────────────────
+    # FIXED: QAPPolicy already embeds critic_head (§5: ~391 total params).
+    # Previously a separate CVRPCritic was also instantiated, adding 257 duplicate
+    # params (total ~648). Now policy alone is used — matches the spec budget.
     policy = QAPPolicy(
         feature_dim=5, hidden_dim=opts.hidden_dim,
         knn_k=opts.knn_k, lambda_init=opts.lambda_init,
     ).to(device)
-    critic = CVRPCritic(feature_dim=5, hidden_dim=opts.hidden_dim).to(device)
 
-    actor_p  = sum(p.numel() for p in policy.parameters())
-    critic_p = sum(p.numel() for p in critic.parameters())
-    print(f"Model: {actor_p + critic_p} params (actor={actor_p}, critic={critic_p})")
+    total_p = sum(p.numel() for p in policy.parameters())
+    print(f"Model: {total_p} params (spec ~391)")
 
     # ── Generator + Env + Trainer ────────────────────────────────────
     gen = CVRPGenerator(num_loc=opts.graph_size, capacity=opts.capacity)
     env = CVRPEnv(num_loc=opts.graph_size, device=str(device))
 
+    # FIXED: no longer passing critic= (PPOTrainer now uses policy.get_value())
     trainer = PPOTrainer(
-        policy=policy, critic=critic, env=env, generator=gen,
+        policy=policy, env=env, generator=gen,
         clip_epsilon=opts.eps_clip, entropy_coef=opts.c2,
         value_coef=opts.c1, max_grad_norm=opts.max_grad_norm,
         ppo_epochs=opts.K_epochs, gamma=opts.gamma,
         gae_lambda=opts.gae_lambda, lr=opts.lr_model,
         batch_size=opts.batch_size, device=str(device),
-        log_dir=opts.output_dir,
+        log_dir=opts.output_dir, n_minibatches=opts.n_minibatches,
     )
 
     os.makedirs(opts.output_dir, exist_ok=True)
+
+    # ── FIX 5: checkpoint resume ─────────────────────────────────────
+    start_epoch = 0
+    if opts.load_path and os.path.isfile(opts.load_path):
+        ckpt = torch.load(opts.load_path, map_location=device)
+        policy.load_state_dict(ckpt["policy"])
+        # FIXED: no separate critic key — critic_head is part of policy state_dict
+        trainer.optimizer.load_state_dict(ckpt["optimizer"])
+        start_epoch = ckpt["epoch"]
+        print(f"[Resume] Loaded from {opts.load_path} (epoch {start_epoch})")
+
+    # ── FIX 5: eval-only exit ────────────────────────────────────────
+    if opts.eval_only:
+        val_dist, val_feas = greedy_eval(
+            policy, env, val_coords, val_demands, val_cap, device
+        )
+        print(f"Eval: tour_len={val_dist:.4f}  feasibility={val_feas*100:.1f}%")
+        return
+
     iters_per_epoch = opts.epoch_size // opts.batch_size
 
     # ── Header ───────────────────────────────────────────────────────
@@ -159,7 +173,7 @@ def main():
     print("-" * 72)
 
     best_val = float("inf")
-    for epoch in range(opts.n_epochs):
+    for epoch in range(start_epoch, opts.n_epochs):
         t0 = time.time()
 
         if torch.cuda.is_available():
@@ -202,16 +216,16 @@ def main():
             print(f"\n*** VRAM exceeded 3.5 GB ({vram_mb:.0f} MB) — stopping ***")
             break
 
-        if val_feas < 0.95:
+        if epoch >= 10 and val_feas < 0.95:
             print(f"\n*** Feasibility dropped below 95% ({val_feas*100:.1f}%) — stopping ***")
             break
 
         # ── Checkpoint ───────────────────────────────────────────────
         ckpt_path = os.path.join(opts.output_dir, f"epoch_{epoch+1:03d}.pt")
+        # FIXED: no separate critic state — critic_head is inside policy
         torch.save({
             "epoch": epoch + 1,
             "policy": policy.state_dict(),
-            "critic": critic.state_dict(),
             "optimizer": trainer.optimizer.state_dict(),
             "val_dist": val_dist,
             "val_feas": val_feas,

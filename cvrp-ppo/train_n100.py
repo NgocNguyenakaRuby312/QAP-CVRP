@@ -9,7 +9,7 @@ sys.path.insert(0, SCRIPT_DIR)
 
 from tqdm import tqdm
 import matplotlib
-matplotlib.use("TkAgg")
+matplotlib.use("Agg")   # non-interactive: no Tk window, no event-loop interference with tqdm
 import matplotlib.pyplot as plt
 try:
     plt.style.use("seaborn-v0_8-whitegrid")
@@ -34,11 +34,14 @@ CAPACITY          = 50
 BATCH_SIZE        = 256
 N_EPOCHS          = 100
 EPOCH_SIZE        = 128_000
-LR                = 1e-4
+LR                = 3e-5      # FIXED: was 1e-4
+ENTROPY_COEF      = 0.05      # FIXED: was 0.01
 SEED              = 1234
 LKH3_REF          = 15.65
 BATCHES_PER_EPOCH = EPOCH_SIZE // BATCH_SIZE   # 500
+TOTAL_OPT_STEPS   = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8
 OUTPUT_DIR        = os.path.join(SCRIPT_DIR, "outputs", "n100")
+EPOCH_DIR         = os.path.join(OUTPUT_DIR, "epochs")
 VAL_PATH          = os.path.join(SCRIPT_DIR, "datasets", "val_n100.pkl")
 VAL_EVAL_SIZE     = 1000
 
@@ -124,6 +127,59 @@ def plot_route_map(coords_np, actions_list, graph_size, tour_length,
     return fig
 
 
+def plot_cluster_map(coords_np, actions_list, demands_np, capacity, graph_size,
+                     title, save_path):
+    """Plot nodes coloured by cluster (vehicle route), no arrows."""
+    import math
+    COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
+              "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
+
+    routes = []
+    cur = []
+    for node in actions_list:
+        if node == 0:
+            if cur:
+                routes.append(cur)
+            cur = []
+        else:
+            cur.append(node)
+    if cur:
+        routes.append(cur)
+
+    total_demand = int(sum(demands_np[1:graph_size + 1]))
+    k_theory = math.ceil(total_demand / capacity)
+    k_actual = len(routes)
+
+    fig, ax = plt.subplots(figsize=(8, 8))
+    fig.patch.set_facecolor("white")
+
+    ax.plot(coords_np[0, 0], coords_np[0, 1], "r*",
+            markersize=20, label="Depot", zorder=5)
+
+    for r_idx, route in enumerate(routes):
+        color = COLORS[r_idx % len(COLORS)]
+        xs = [coords_np[n, 0] for n in route]
+        ys = [coords_np[n, 1] for n in route]
+        ax.scatter(xs, ys, color=color, s=80, zorder=4,
+                   label=f"Cluster {r_idx + 1}  ({len(route)} nodes)")
+        for n in route:
+            ax.annotate(str(n), (coords_np[n, 0], coords_np[n, 1]),
+                        textcoords="offset points", xytext=(3, 3), fontsize=7)
+
+    ax.set_title(
+        f"{title}\nK = {k_actual} routes  |  theory ceil({total_demand}/{capacity}) = {k_theory}",
+        fontsize=13,
+    )
+    ax.legend(loc="upper right", fontsize=8, ncol=2)
+    ax.set_xlabel("x", fontsize=12)
+    ax.set_ylabel("y", fontsize=12)
+    ax.set_aspect("equal")
+
+    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved: {save_path}")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Main
 # ═══════════════════════════════════════════════════════════════════════════
@@ -131,13 +187,13 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     set_seed(SEED)
 
+    # FIXED: QAPPolicy already contains critic_head (~391 total params per spec §5).
+    # Removed separate CVRPCritic() which was adding 257 duplicate params → ~648 total (wrong).
     policy = QAPPolicy()
-    critic = CVRPCritic()
     env = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
     generator = CVRPGenerator(GRAPH_SIZE, CAPACITY)
 
-    n_actor = sum(p.numel() for p in policy.parameters())
-    n_critic = sum(p.numel() for p in critic.parameters())
+    n_params = sum(p.numel() for p in policy.parameters())
 
     print("=" * 72)
     print(f"  QAP-DRL Training — CVRP-{GRAPH_SIZE}")
@@ -155,15 +211,18 @@ def main():
         print(f"  Device         : {device}  ({gpu}, {vram:.1f} GB VRAM)")
     else:
         print(f"  Device         : {device}")
-    print(f"  Parameters     : {n_actor} (actor) + {n_critic} (critic)"
-          f" = {n_actor + n_critic} total")
+    print(f"  Parameters     : {n_params} total (spec ~391)")
     print(f"  Output dir     : {OUTPUT_DIR}")
     print("=" * 72)
 
     os.makedirs(OUTPUT_DIR, exist_ok=True)
+    os.makedirs(EPOCH_DIR, exist_ok=True)
+    # FIXED: no longer passing critic= (PPOTrainer uses policy.get_value() internally)
     trainer = PPOTrainer(
-        policy=policy, critic=critic, env=env, generator=generator,
-        lr=LR, batch_size=BATCH_SIZE, device=str(device), log_dir=OUTPUT_DIR,
+        policy=policy, env=env, generator=generator,
+        lr=LR, entropy_coef=ENTROPY_COEF, batch_size=BATCH_SIZE,
+        total_steps=TOTAL_OPT_STEPS,
+        device=str(device), log_dir=OUTPUT_DIR,
     )
 
     val_coords, val_demands, val_cap = load_dataset(VAL_PATH, device=str(device))
@@ -173,14 +232,30 @@ def main():
         val_cap,
     )
 
-    # ── Live chart setup ────────────────────────────────────────────────
-    plt.ion()
+    # ── Resume from latest checkpoint ──────────────────────────────────
+    start_epoch = 1
+    best_tour   = float("inf")
+    best_epoch  = 0
+    existing = sorted([
+        f for f in os.listdir(EPOCH_DIR) if f.startswith("epoch_") and f.endswith(".pt")
+    ])
+    if existing:
+        ckpt_path = os.path.join(EPOCH_DIR, existing[-1])
+        ckpt = torch.load(ckpt_path, map_location=device)
+        trainer.policy.load_state_dict(ckpt["policy_state"])
+        trainer.optimizer.load_state_dict(ckpt["optimizer_state"])
+        start_epoch = ckpt["iteration"] + 1
+        best_tour   = ckpt["metrics"].get("val_tour", float("inf"))
+        best_epoch  = ckpt["iteration"]
+        print(f"  Resumed from   : {existing[-1]}  (epoch {ckpt['iteration']}, tour {best_tour:.4f})")
+    else:
+        print("  Starting fresh training.")
+    print("=" * 72)
+
+    # ── Chart setup (saved to file each epoch, no live window) ─────────
     fig_live, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(15, 4))
     fig_live.suptitle(f"QAP-DRL Training — CVRP-{GRAPH_SIZE}", fontsize=14)
     epochs_hist, tour_hist, loss_hist, ent_hist = [], [], [], []
-
-    best_tour = float("inf")
-    best_epoch = 0
 
     header = (
         f"{'Epoch':>5} | {'Tour Length':>11} | {'vs LKH3':>9} | "
@@ -191,7 +266,7 @@ def main():
     tqdm.write(f"\n{header}")
     tqdm.write(sep)
 
-    epoch_bar = tqdm(range(1, N_EPOCHS + 1), desc="Training", unit="epoch")
+    epoch_bar = tqdm(range(start_epoch, N_EPOCHS + 1), desc="Training", unit="epoch")
     for epoch in epoch_bar:
         t0 = time.time()
         if torch.cuda.is_available():
@@ -199,11 +274,7 @@ def main():
 
         rewards, losses_list, feas_list = [], [], []
 
-        batch_bar = tqdm(
-            range(BATCHES_PER_EPOCH), desc=f"Epoch {epoch:3d}",
-            unit="batch", leave=False,
-        )
-        for _ in batch_bar:
+        for batch_idx in range(BATCHES_PER_EPOCH):
             mean_rew = trainer.collect_rollout()
             losses = trainer.update()
 
@@ -217,11 +288,14 @@ def main():
             losses_list.append(losses)
             feas_list.append(feas)
 
-            batch_bar.set_postfix(
-                ppo_loss=f"{losses['total_loss']:.4f}",
-                entropy=f"{losses['entropy']:.4f}",
-                feasibility=f"{feas * 100:.1f}%",
-            )
+            # Update outer bar every 10 batches (avoids Windows tqdm line-spam)
+            if batch_idx % 10 == 0:
+                epoch_bar.set_postfix(
+                    batch=f"{batch_idx+1}/{BATCHES_PER_EPOCH}",
+                    loss=f"{losses['total_loss']:.3f}",
+                    ent=f"{losses['entropy']:.3f}",
+                    feas=f"{feas*100:.0f}%",
+                )
 
         avg_loss = sum(l["total_loss"] for l in losses_list) / len(losses_list)
         avg_ent = sum(l["entropy"] for l in losses_list) / len(losses_list)
@@ -240,13 +314,13 @@ def main():
             "feasibility": avg_feas, "vram_mb": vram,
         }, step=epoch)
 
+        # FIXED: no separate critic_state — critic_head is inside policy state_dict
         torch.save({
             "iteration": epoch,
             "policy_state": trainer.policy.state_dict(),
-            "critic_state": trainer.critic.state_dict(),
             "optimizer_state": trainer.optimizer.state_dict(),
             "metrics": {"val_tour": val_tour, "val_gap": val_gap},
-        }, os.path.join(OUTPUT_DIR, f"epoch_{epoch:03d}.pt"))
+        }, os.path.join(EPOCH_DIR, f"epoch_{epoch:03d}.pt"))
 
         is_best = val_tour < best_tour
         if is_best:
@@ -294,13 +368,11 @@ def main():
         ax3.set_xlabel("Epoch", fontsize=12)
 
         fig_live.tight_layout(rect=[0, 0, 1, 0.93])
-        plt.pause(0.1)
+        fig_live.savefig(os.path.join(OUTPUT_DIR, "training_curves.png"), dpi=150, bbox_inches="tight")
 
     trainer.logger.close()
 
-    curves_path = os.path.join(OUTPUT_DIR, "training_curves.png")
-    fig_live.savefig(curves_path, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {curves_path}")
+    print(f"  Saved: {os.path.join(OUTPUT_DIR, 'training_curves.png')}")
 
     # ── Route map using best model ──────────────────────────────────────
     best_policy = QAPPolicy()
@@ -332,12 +404,21 @@ def main():
     best_i = dists.argmin().item()
     best_dist = dists[best_i].item()
 
+    best_coords_np    = bc[best_i].cpu().numpy()
+    best_actions_list = actions[best_i].cpu().tolist()
+
     plot_route_map(
-        bc[best_i].cpu().numpy(),
-        actions[best_i].cpu().tolist(),
+        best_coords_np, best_actions_list,
         GRAPH_SIZE, best_dist,
         f"Best Route — CVRP-{GRAPH_SIZE} | Tour Length: {best_dist:.2f}",
         os.path.join(OUTPUT_DIR, "best_route.png"),
+    )
+
+    plot_cluster_map(
+        best_coords_np, best_actions_list,
+        bd[best_i].cpu().numpy(), CAPACITY, GRAPH_SIZE,
+        f"Cluster Map — CVRP-{GRAPH_SIZE}",
+        os.path.join(OUTPUT_DIR, "cluster_map.png"),
     )
 
     print()
@@ -350,8 +431,7 @@ def main():
     print(f"  Model saved      : {os.path.join(OUTPUT_DIR, 'best_model.pt')}")
     print("=" * 72)
 
-    plt.ioff()
-    plt.show()
+    plt.close("all")
 
 
 if __name__ == "__main__":

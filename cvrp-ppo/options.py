@@ -25,19 +25,24 @@ def get_options(args=None):
     parser.add_argument("--lambda_init",   type=float, default=0.1)
 
     # ── PPO ──────────────────────────────────────────────────────────
-    parser.add_argument("--K_epochs",     type=int,   default=3)
-    parser.add_argument("--eps_clip",     type=float, default=0.2)
-    parser.add_argument("--gamma",        type=float, default=0.99)
-    parser.add_argument("--gae_lambda",   type=float, default=0.95)
-    parser.add_argument("--c1",           type=float, default=0.5)
-    parser.add_argument("--c2",           type=float, default=0.01)
+    parser.add_argument("--K_epochs",      type=int,   default=3)
+    parser.add_argument("--eps_clip",      type=float, default=0.2)
+    parser.add_argument("--gamma",         type=float, default=0.99)
+    parser.add_argument("--gae_lambda",    type=float, default=0.95)
+    parser.add_argument("--c1",            type=float, default=0.5)
+    parser.add_argument("--c2",            type=float, default=0.05,
+                        help="Entropy bonus weight (FIXED: was 0.01)")
+    parser.add_argument("--n_minibatches", type=int,   default=8,
+                        help="Minibatches per PPO epoch")
 
     # ── Training ─────────────────────────────────────────────────────
     parser.add_argument("--n_epochs",     type=int,   default=100)
     parser.add_argument("--epoch_size",   type=int,   default=128_000)
     parser.add_argument("--batch_size",   type=int,   default=256)
-    parser.add_argument("--lr_model",     type=float, default=1e-4)
-    parser.add_argument("--lr_critic",    type=float, default=1e-4)
+    parser.add_argument("--lr_model",     type=float, default=3e-5,
+                        help="Actor LR (FIXED: was 1e-4)")
+    parser.add_argument("--lr_critic",    type=float, default=3e-5,
+                        help="Critic LR (FIXED: was 1e-4)")
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
 
     # ── Evaluation ───────────────────────────────────────────────────

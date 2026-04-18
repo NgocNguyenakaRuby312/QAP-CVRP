@@ -1,6 +1,6 @@
 """
 utils/metrics.py  —  Solution quality metrics
-utils/logger.py   —  Training logger (console + optional W&B / TensorBoard)
+utils/logger.py   —  Training logger: JSON-lines file + optional W&B / TensorBoard
 utils/checkpoint.py — Save / load checkpoints
 """
 
@@ -61,17 +61,61 @@ import json
 import time
 
 
+# Mapping: log key → human label for the console summary line
+_FIELD_LABELS = {
+    "val_tour":     "val_tour",
+    "val_gap_pct":  "gap%",
+    "train_tour":   "train_tour",
+    "greedy_tour":  "greedy",
+    "improvement":  "imprv",
+    "policy_loss":  "p_loss",
+    "value_loss":   "v_loss",
+    "entropy":      "entropy",
+    "grad_norm":    "grad",
+    "clip_fraction":"clip%",
+    "ratio_mean":   "ratio",
+    "adv_std":      "adv_std",
+    "lambda_val":   "λ",
+    "lr":           "lr",
+    "feasibility":  "feas%",
+    "vram_mb":      "vram",
+    "epoch_time_s": "t(s)",
+}
+
+
 class Logger:
     """
-    Lightweight logger.  Writes JSON lines to a file and optionally
-    forwards to Weights & Biases or TensorBoard.
+    Training logger.
+
+    Writes one JSON line per epoch to train_log.jsonl.
+    Each line contains ~20 fields covering every failure mode:
+
+        Validation quality:   val_tour, val_gap_pct, best_tour, best_epoch
+        Training quality:     train_tour, greedy_tour, improvement
+        PPO losses (SPLIT):   policy_loss, value_loss, entropy
+        Gradient health:      grad_norm, clip_fraction, ratio_mean
+        Learning signal:      adv_mean, adv_std
+        Model state:          lambda_val, lr
+        System:               feasibility, vram_mb, epoch_time_s
+
+    Why each field matters for diagnosis:
+        policy_loss   — should decrease; flat = no gradient signal
+        value_loss    — should fall fast then stay near 0; high = critic diverged
+        entropy       — should decrease from ~3.5; flat = policy not committing
+        grad_norm     — >10 explosion, <1e-4 vanishing
+        clip_fraction — >0.3 policy changing too fast (reduce LR)
+        ratio_mean    — should stay near 1.0
+        adv_std       — near-zero = greedy and sampled indistinguishable (no signal)
+        improvement   — greedy_tour − train_tour; near-0 = policy == random
+        lambda_val    — should drift from 0.1 as it learns interference weight
+        lr            — confirms cosine schedule is moving
 
     Args:
-        log_dir:         directory for log files
+        log_dir:         directory for train_log.jsonl
         use_wandb:       enable W&B logging
-        use_tensorboard: enable TensorBoard logging
+        use_tensorboard: enable TensorBoard SummaryWriter
         project:         W&B project name
-        run_name:        W&B / TB run name
+        run_name:        W&B / TB run identifier
     """
 
     def __init__(
@@ -104,7 +148,14 @@ class Logger:
                 print("[Logger] TensorBoard not installed; skipping.")
 
     def log_scalars(self, metrics: dict, step: int):
-        """Write metrics to file, W&B, and TensorBoard."""
+        """
+        Write one epoch record to train_log.jsonl.
+
+        Args:
+            metrics: dict of scalar values — should include all fields
+                     listed in _FIELD_LABELS for full diagnostic coverage
+            step:    epoch number (1-indexed)
+        """
         row = {"step": step, "time": time.time(), **metrics}
         self._file.write(json.dumps(row) + "\n")
         self._file.flush()
@@ -114,7 +165,8 @@ class Logger:
 
         if self._tb:
             for k, v in metrics.items():
-                self._tb.add_scalar(k, v, step)
+                if isinstance(v, (int, float)):
+                    self._tb.add_scalar(k, v, step)
 
     def close(self):
         self._file.close()
@@ -155,8 +207,8 @@ def load_checkpoint(path: str, policy, critic, optimizer) -> int:
 
 
 def save_best_model(policy, metric_val: float, best_val: float, path: str) -> float:
-    """Save policy weights only if metric_val is better than best_val."""
-    if metric_val > best_val:
+    """Save policy weights only if metric_val is better (lower) than best_val."""
+    if metric_val < best_val:
         torch.save(policy.state_dict(), path)
         print(f"[Best model] Updated ({best_val:.4f} → {metric_val:.4f}) → {path}")
         return metric_val

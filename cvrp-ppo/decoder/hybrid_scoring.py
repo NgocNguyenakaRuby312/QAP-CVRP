@@ -41,10 +41,11 @@ class HybridScoring(nn.Module):
         """
         B, Np1, k = knn_indices.shape
 
-        # Gather neighbour embeddings
-        idx = knn_indices.unsqueeze(-1).expand(B, Np1, k, 2)          # [B, N+1, k, 2]
-        neighbors = psi_prime.unsqueeze(1).expand(B, Np1, Np1, 2) \
-                    .gather(2, idx)                                    # [B, N+1, k, 2]
+        # Gather neighbour embeddings via flat index — avoids [B,N+1,N+1,2] expansion (BUG M2)
+        flat_idx   = knn_indices.reshape(B, -1)                        # [B, (N+1)*k]
+        flat_idx_e = flat_idx.unsqueeze(-1).expand(B, Np1 * k, 2)     # [B, (N+1)*k, 2]
+        neighbors  = psi_prime.gather(1, flat_idx_e)                   # [B, (N+1)*k, 2]
+        neighbors  = neighbors.view(B, Np1, k, 2)                      # [B, N+1, k, 2]
 
         # Dot product of each node j with each of its k neighbours
         psi_exp = psi_prime.unsqueeze(2).expand(B, Np1, k, 2)         # [B, N+1, k, 2]

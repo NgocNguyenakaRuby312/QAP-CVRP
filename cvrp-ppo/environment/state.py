@@ -1,130 +1,158 @@
+"""
+environment/state.py
+====================
+State representation for the constructive CVRP environment.
+
+The environment uses a plain dict (not a class) for state. All keys:
+
+    coords        [B, N+1, 2]   float32  depot at index 0
+    demands       [B, N+1]      float32  depot demand = 0
+    capacity      [B]           float32  vehicle capacity C
+    current_node  [B]           int64    current vehicle position
+    used_capacity [B]           float32  demand used on current route
+    visited       [B, N+1]      bool     True = customer already visited
+                                         depot (index 0) is NEVER True
+    action_mask   [B, N+1]      bool     True = FEASIBLE (can select)
+                                         NOTE: this is True=feasible,
+                                         opposite of masked_fill convention.
+                                         Decoder inverts: mask = ~action_mask
+    step_count    [B]           int64    steps taken so far
+    done          [B]           bool     True = all customers visited
+
+Episode ends when done.all() is True.
+New route starts when agent selects depot (index 0).
+Depot action resets used_capacity to 0.
+
+StateCVRP is also provided as a class-based representation (used by tests).
+"""
+
 import torch
 
 
 class StateCVRP:
     """
-    Constructive MDP state for CVRP.
+    Class-based CVRP state for use in tests and alternative interfaces.
 
-    Static fields (set at episode start):
-        coords:      [batch, N+1, 2]  — depot at index 0
-        demands:     [batch, N+1]     — depot demand = 0
-        capacity:    float            — vehicle capacity Q
-        num_nodes:   int              — N+1 (including depot)
-
-    Dynamic fields (updated each step):
-        cur_node:      [batch]        — current vehicle position (node index)
-        used_capacity: [batch]        — demand consumed on current route
-        visited:       [batch, N+1]   — bool mask, True = already visited
-        lengths:       [batch]        — accumulated travel distance
-        step:          int            — current step count
+    Attributes:
+        coords        [B, N+1, 2]  float32
+        demands       [B, N+1]     float32   depot demand = 0
+        capacity      float        vehicle capacity C
+        cur_node      [B]          int64     current vehicle position
+        used_capacity [B]          float32   demand used on current route
+        visited       [B, N+1]    bool      True = customer visited; depot always False
+        lengths       [B]          float32   cumulative tour length so far
+        step          int          decode steps taken
     """
 
-    def __init__(self, coords, demands, capacity, cur_node, used_capacity, visited, lengths, step):
-        self.coords = coords
-        self.demands = demands
-        self.capacity = capacity
-        self.num_nodes = coords.size(1)
-        self.cur_node = cur_node
+    def __init__(
+        self,
+        coords:        torch.Tensor,
+        demands:       torch.Tensor,
+        capacity:      float,
+        cur_node:      torch.Tensor,
+        used_capacity: torch.Tensor,
+        visited:       torch.Tensor,
+        lengths:       torch.Tensor,
+        step:          int,
+    ):
+        self.coords        = coords
+        self.demands       = demands
+        self.capacity      = capacity
+        self.cur_node      = cur_node
         self.used_capacity = used_capacity
-        self.visited = visited
-        self.lengths = lengths
-        self.step = step
+        self.visited       = visited
+        self.lengths       = lengths
+        self.step          = step
 
-    @staticmethod
-    def initialize(coords, demands, capacity):
+    @classmethod
+    def initialize(cls, coords: torch.Tensor, demands: torch.Tensor, capacity) -> "StateCVRP":
         """
-        Create initial state: all vehicles start at depot (index 0).
+        Create initial state: all vehicles at depot, zero capacity used.
 
         Args:
-            coords: [batch, N+1, 2]
-            demands: [batch, N+1]
-            capacity: float
-        """
-        batch_size = coords.size(0)
-        num_nodes = coords.size(1)
-        device = coords.device
-
-        cur_node = torch.zeros(batch_size, dtype=torch.long, device=device)
-        used_capacity = torch.zeros(batch_size, device=device)
-        visited = torch.zeros(batch_size, num_nodes, dtype=torch.bool, device=device)
-        # Depot is not marked visited — vehicles can revisit it
-        lengths = torch.zeros(batch_size, device=device)
-
-        return StateCVRP(coords, demands, capacity, cur_node, used_capacity, visited, lengths, step=0)
-
-    def update(self, selected):
-        """
-        Move vehicles to selected nodes and return new state + step costs.
-
-        Args:
-            selected: [batch] — indices of selected nodes
+            coords:   [B, N+1, 2]
+            demands:  [B, N+1]
+            capacity: scalar float or int
 
         Returns:
-            new_state: updated StateCVRP
-            step_cost: [batch] — distance traveled this step (positive)
+            StateCVRP at step 0
         """
-        batch_size = self.coords.size(0)
-        device = self.coords.device
-
-        # Gather coordinates
-        cur_coords = self.coords[torch.arange(batch_size, device=device), self.cur_node]  # [batch, 2]
-        next_coords = self.coords[torch.arange(batch_size, device=device), selected]      # [batch, 2]
-
-        # Step distance
-        step_cost = (cur_coords - next_coords).norm(dim=-1)  # [batch]
-
-        # Update used capacity: reset if returning to depot, else add demand
-        is_depot = (selected == 0)
-        new_demands = self.demands[torch.arange(batch_size, device=device), selected]
-        new_used_capacity = torch.where(is_depot, torch.zeros_like(self.used_capacity),
-                                        self.used_capacity + new_demands)
-
-        # Update visited mask: mark customer nodes as visited (not depot)
-        new_visited = self.visited.clone()
-        # Only mark non-depot nodes as visited
-        customer_mask = (selected != 0)
-        new_visited[torch.arange(batch_size, device=device), selected] = (
-            new_visited[torch.arange(batch_size, device=device), selected] | customer_mask
+        B      = coords.size(0)
+        N1     = coords.size(1)
+        device = coords.device
+        return cls(
+            coords        = coords,
+            demands       = demands,
+            capacity      = float(capacity),
+            cur_node      = torch.zeros(B, dtype=torch.long, device=device),
+            used_capacity = torch.zeros(B, device=device),
+            visited       = torch.zeros(B, N1, dtype=torch.bool, device=device),
+            lengths       = torch.zeros(B, device=device),
+            step          = 0,
         )
 
-        new_lengths = self.lengths + step_cost
-
-        return StateCVRP(
-            self.coords, self.demands, self.capacity,
-            selected, new_used_capacity, new_visited, new_lengths, self.step + 1
-        ), step_cost
-
-    def get_feasible_mask(self):
+    def update(self, action: torch.Tensor):
         """
-        Returns mask where True = INFEASIBLE (cannot select).
+        Transition to next state by selecting nodes in `action`.
 
-        Rules:
-            - Already visited customers are infeasible
-            - Customers whose demand exceeds remaining capacity are infeasible
-            - Depot (index 0) is always feasible (vehicle can return)
-            - If currently at depot and all customers visited, everything is infeasible
-              except depot (to allow episode termination check)
+        Args:
+            action: [B]  node indices (0 = depot)
 
         Returns:
-            mask: [batch, N+1] bool tensor, True = infeasible
+            (new_state, step_cost)   step_cost [B] euclidean distance travelled
         """
-        batch_size = self.coords.size(0)
-        device = self.coords.device
+        B      = action.shape[0]
+        device = action.device
 
-        remaining_cap = self.capacity - self.used_capacity  # [batch]
+        # Step cost: distance from current node to selected node
+        arange      = torch.arange(B, device=device)
+        cur_coords  = self.coords[arange, self.cur_node]        # [B, 2]
+        next_coords = self.coords[arange, action]               # [B, 2]
+        step_cost   = (next_coords - cur_coords).norm(dim=-1)   # [B]
 
-        # Start with visited mask
-        mask = self.visited.clone()
+        # Update visited: scatter True at action positions
+        visited_new = self.visited.clone()
+        visited_new.scatter_(1, action.unsqueeze(1),
+                             torch.ones(B, 1, dtype=torch.bool, device=device))
+        visited_new[:, 0] = False                               # depot never permanently visited
 
-        # Also mask customers whose demand exceeds remaining capacity
-        exceeds_cap = self.demands > remaining_cap.unsqueeze(-1)  # [batch, N+1]
-        mask = mask | exceeds_cap
+        # Update used capacity (reset to 0 when returning to depot)
+        at_depot     = (action == 0)                            # [B]
+        demand_taken = self.demands[arange, action]             # [B]
+        new_used     = torch.where(
+            at_depot,
+            torch.zeros_like(self.used_capacity),
+            self.used_capacity + demand_taken,
+        )
 
-        # Depot is always feasible
-        mask[:, 0] = False
+        new_state = StateCVRP(
+            coords        = self.coords,
+            demands       = self.demands,
+            capacity      = self.capacity,
+            cur_node      = action.clone(),
+            used_capacity = new_used,
+            visited       = visited_new,
+            lengths       = self.lengths + step_cost,
+            step          = self.step + 1,
+        )
+        return new_state, step_cost
 
+    def get_feasible_mask(self) -> torch.Tensor:
+        """
+        Returns infeasibility mask: True = node CANNOT be selected.
+
+        A customer is infeasible if already visited or its demand exceeds
+        remaining capacity. Depot (index 0) is always feasible.
+
+        Returns:
+            mask [B, N+1]  bool  True = infeasible
+        """
+        remaining = self.capacity - self.used_capacity          # [B]
+        exceeds   = self.demands > remaining.unsqueeze(1)       # [B, N+1]
+        mask      = self.visited | exceeds                      # [B, N+1]
+        mask[:, 0] = False                                      # depot always feasible
         return mask
 
-    def all_finished(self):
-        """True when all customer nodes (indices 1..N) have been visited in every batch element."""
-        return self.visited[:, 1:].all()
+    def all_finished(self) -> bool:
+        """True when all customers in every instance have been visited."""
+        return bool(self.visited[:, 1:].all())

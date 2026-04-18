@@ -60,6 +60,7 @@ class FeatureBuilder(nn.Module):
 
         # ── Feature [1]: ‖i − depot‖ (raw distance) ─────────────────  # Eq: x_i[1]
         feat_dist = diff.norm(dim=-1)                                  # [B, N+1]
+        # Depot row: diff[:,0,:] = [0,0] → feat_dist[:,0] = 0 (correct: self-distance)
 
         # ── Feature [2]: xᵢ (raw coordinate) ────────────────────────  # Eq: x_i[2]
         feat_x = coords[:, :, 0]                                      # [B, N+1]
@@ -68,6 +69,9 @@ class FeatureBuilder(nn.Module):
         feat_y = coords[:, :, 1]                                      # [B, N+1]
 
         # ── Feature [4]: atan2(Δy, Δx) / π ──────────────────────────  # Eq: x_i[4]
+        # Depot row: atan2(0, 0) → PyTorch returns 0.0 (C standard).
+        # This is acceptable: the depot has no meaningful polar angle relative
+        # to itself, and feat_dist[:,0] = 0 already encodes "this IS the depot".
         feat_angle = torch.atan2(diff[:, :, 1], diff[:, :, 0]) / math.pi  # [B, N+1] ∈ [-1, 1]
 
         features = torch.stack(

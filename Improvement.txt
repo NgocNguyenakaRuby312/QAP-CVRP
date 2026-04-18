@@ -1,0 +1,11 @@
+Phase 1 — no architecture changes (do now, this week)
+These four changes together should get you from 23.84% to roughly 12–15%:
+ENTROPY_COEF: raise from 0.02 to 0.05. The current 0.02 stops working at epoch 58. You need the entropy penalty strong enough to keep H[π] above 0.5 past epoch 100.
+EPOCH_SIZE: raise from 51,200 to 128,000. The thesis specification in KNOWLEDGE_research_context.md says 128K instances per epoch. You've been training on 60% of that. More unique instances per epoch = better generalization.
+knn_k: raise from 5 to 10 for CVRP-20 specifically. With only 20 nodes, k=5 means each node sees 25% of the graph. k=10 covers half, giving the interference term more signal.
+Inference-time augmentation: sample 8 stochastic solutions per instance at evaluation, return the best. This requires no retraining — just modify the evaluate() function. It's how POMO gets most of its improvement over AM.
+Phase 2 — architecture change (after phase 1 confirms improvement)
+Increase the amplitude dimension from 2D to 4D. Currently ψ ∈ ℝ² — everything is projected onto a unit circle, a single angle. Demand, distance, angle, and coordinates all compete for that one degree of freedom. Moving to ψ ∈ ℝ⁴ (unit hypersphere) with 4D rotations gives the encoder 4× more representational power while still being dramatically smaller than AM's 128D. The parameter count stays under 618.
+Phase 3 — longer training (after phases 1 and 2)
+The model was still improving at epoch 199. Run 400 epochs with CosineAnnealingWarmRestarts instead of CosineAnnealingLR — the warm restarts let the optimizer periodically escape local optima instead of monotonically decaying.
+One important clarification on the target: per the thesis knowledge base, the QAP-DRL target is tour length 6.15–6.35 for CVRP-20, which corresponds to ~1–5% gap vs LKH-3 (6.10), not vs OR-Tools. The OR-Tools reference you're using (6.19 with 2s limit) is actually slightly worse than LKH-3. So "<5% vs OR-Tools" means a tour below ~6.50, which is achievable. "<5% vs LKH-3" means a tour below ~6.40, which is harder and requires all three phases.
