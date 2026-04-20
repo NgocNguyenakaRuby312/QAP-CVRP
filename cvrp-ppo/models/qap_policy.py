@@ -15,6 +15,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical
 
 from encoder import FullEncoder
+from encoder.baseline_encoder import FullBaselineEncoder
 from decoder import QAPDecoder
 
 
@@ -31,14 +32,19 @@ class QAPPolicy(nn.Module):
 
     def __init__(
         self,
-        feature_dim:  int   = 5,
-        hidden_dim:   int   = 16,
-        knn_k:        int   = 5,
-        lambda_init:  float = 0.1,
+        feature_dim:   int   = 5,
+        hidden_dim:    int   = 16,
+        knn_k:         int   = 5,
+        lambda_init:   float = 0.1,
+        encoder_type:  str   = "qap",   # "qap" = full QAP-DRL  |  "baseline" = plain MLP (ablation b)
         **kwargs,
     ):
         super().__init__()
-        self.encoder = FullEncoder(feature_dim, 2, hidden_dim, knn_k)
+        if encoder_type == "baseline":
+            self.encoder = FullBaselineEncoder(feature_dim, 2, knn_k)
+        else:
+            self.encoder = FullEncoder(feature_dim, 2, hidden_dim, knn_k)
+        self.encoder_type = encoder_type
         self.decoder = QAPDecoder(4, 2, lambda_init)
         self.critic_head = nn.Sequential(                              # §5: 2→64→1
             nn.Linear(2, 64), nn.ReLU(), nn.Linear(64, 1),

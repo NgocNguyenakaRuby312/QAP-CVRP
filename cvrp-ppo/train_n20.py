@@ -31,6 +31,7 @@ from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker
 try:
     plt.style.use("seaborn-v0_8-whitegrid")
 except OSError:
@@ -52,16 +53,17 @@ from utils.ortools_refs import ensure_ortools_ref
 # ═══════════════════════════════════════════════════════════════════════════
 GRAPH_SIZE           = 20
 CAPACITY             = 30
-BATCH_SIZE           = 256
+BATCH_SIZE           = 512             # (P1b) was 256 — larger batch → wider adv distribution
 N_EPOCHS             = 200
 EPOCH_SIZE           = 128_000          # (P1) was 51_200 — thesis spec
 LR                   = 1e-4
-ENTROPY_COEF         = 0.05             # (P1) was 0.02 — keep entropy > 0.5 longer
+ENTROPY_COEF         = 0.01             # (P1b) was 0.05 — 0.05 kept entropy too high, collapsing adv signal
+                                        # thesis spec is 0.01; entropy never collapsed (floor=0.55) so 0.05 not needed
 VALUE_COEF           = 0.5
 KNN_K                = 10              # (P1) was 5 — covers 50% of N=20 graph
 SEED                 = 1234
 BATCHES_PER_EPOCH    = EPOCH_SIZE // BATCH_SIZE          # 500
-TOTAL_OPT_STEPS      = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8   # 2,400,000
+TOTAL_OPT_STEPS      = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8   # 1,200,000
 AUG_SAMPLES          = 8               # (P1) inference augmentation: sample ×8, take best
 OUTPUT_DIR           = os.path.join(SCRIPT_DIR, "outputs", "n20")
 EPOCH_DIR            = os.path.join(OUTPUT_DIR, "epochs")
@@ -226,11 +228,15 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a21.axhline(y=0.5, color="#639922", ls=":", lw=0.8, alpha=0.5)
     a21.set_ylabel("entropy", color="#639922")
     a21.tick_params(axis="y", labelcolor="#639922")
+    a21.set_ylim(0.0, max(1.6, max(ent_hist) * 1.1) if ent_hist else 1.6)
     ax_el = a21.twinx()
     ax_el.plot(epochs_hist, eloss_hist, "#BA7517", lw=1.2, ls="--",
                label=f"entropy loss (×{ENTROPY_COEF})")
     ax_el.set_ylabel(f"−H·{ENTROPY_COEF}", color="#BA7517")
     ax_el.tick_params(axis="y", labelcolor="#BA7517")
+    if eloss_hist:
+        ax_el.set_ylim(0.0, max(eloss_hist) * 1.15)
+        ax_el.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
     a21.set_title("Entropy + entropy loss (dual axis)")
     a21.set_xlabel("Epoch")
     lines1, labs1 = a21.get_legend_handles_labels()
@@ -248,10 +254,18 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a31.plot(epochs_hist, clip_hist, "#D85A30", lw=1.5, label="clip% (left)")
     a31.set_ylabel("clip fraction %", color="#D85A30")
     a31.tick_params(axis="y", labelcolor="#D85A30")
+    if clip_hist:
+        a31.set_ylim(0.0, max(clip_hist) * 1.2 if max(clip_hist) > 0 else 0.1)
+        a31.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
     ax_lam = a31.twinx()
     ax_lam.plot(epochs_hist, lam_hist, "#534AB7", lw=1.2, ls="--", label="λ (right)")
     ax_lam.set_ylabel("λ value", color="#534AB7")
     ax_lam.tick_params(axis="y", labelcolor="#534AB7")
+    if lam_hist:
+        lam_min = min(lam_hist); lam_max = max(lam_hist)
+        lam_pad = max((lam_max - lam_min) * 0.15, 0.1)
+        ax_lam.set_ylim(lam_min - lam_pad, lam_max + lam_pad)
+        ax_lam.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
     a31.set_title("Clip fraction + Lambda λ (dual axis)")
     a31.set_xlabel("Epoch")
     lines1, labs1 = a31.get_legend_handles_labels()
