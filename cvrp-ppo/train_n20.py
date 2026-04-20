@@ -69,7 +69,7 @@ OUTPUT_DIR           = os.path.join(SCRIPT_DIR, "outputs", "n20")
 EPOCH_DIR            = os.path.join(OUTPUT_DIR, "epochs")
 ARCHIVE_DIR          = os.path.join(OUTPUT_DIR, "Archive")
 VAL_PATH             = os.path.join(SCRIPT_DIR, "datasets", "val_n20.pkl")
-VAL_EVAL_SIZE        = 500
+VAL_EVAL_SIZE        = 10_000         # key paper standard: 10K instances for reliable val_tour
 ORTOOLS_TIME_LIMIT   = 2.0
 
 
