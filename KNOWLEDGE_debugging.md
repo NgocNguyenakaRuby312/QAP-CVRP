@@ -2,7 +2,7 @@
 
 **Purpose:** Quick-reference for diagnosing and fixing common issues in QAP-DRL implementation.
 **When to reference:** Any error, unexpected behavior, NaN/Inf, shape mismatch, or convergence problem.
-**Last updated:** March 2026
+**Last updated:** April 2026
 
 ---
 
@@ -19,13 +19,16 @@ INPUT
 FEATURE CONSTRUCTION (§3.X.3)
   features:         [B, N+1, 5]     order: [d/C, dist, x, y, angle/π]
 
-ENCODER (§3.X.4-5)
+ENCODER (§3.X.4-5) — QAP mode
   psi (after proj):     [B, N+1, 2]     ← unit norm!
   theta (from MLP):     [B, N+1]
   psi_prime (rotated):  [B, N+1, 2]     ← still unit norm!
 
+ENCODER — baseline mode (ablation)
+  embedding:            [B, N+1, 2]     ← NOT unit norm (ReLU output)
+
 KNN
-  knn_indices:      [B, N+1, k]     where k=5 default, no self-loops
+  knn_indices:      [B, N+1, k]     k=10 for CVRP-20, k=5 for CVRP-50/100
 
 DECODER (per step t, §3.X.6-7)
   psi_curr:         [B, 2]          ← current node's amplitude (zero if at depot)
@@ -38,7 +41,7 @@ DECODER (per step t, §3.X.6-7)
   action:           [B]             ← selected node index
 
 CRITIC
-  pooled:           [B, 2]          ← mean pool of psi_prime
+  pooled:           [B, 2]          ← mean pool of psi_prime (DETACHED)
   value:            [B]             ← MLP(pooled)
 
 PPO
@@ -55,6 +58,7 @@ PPO
 **Symptom:** Amplitude vectors have varying norms; rotation changes magnitude; scores explode.
 **Fix:** Always apply `F.normalize(projected, p=2, dim=-1)` immediately after `self.proj(x)`.
 **Verify:** `assert torch.allclose(psi.norm(dim=-1), torch.ones_like(psi[:,:,0]), atol=1e-5)`
+**Note:** Only applies in QAP mode. Baseline encoder (`encoder_type="baseline"`) intentionally has no L2 norm.
 
 ### P2: Masking AFTER Softmax Instead of BEFORE
 **Symptom:** Infeasible nodes get non-zero probability; invalid tours.
@@ -77,7 +81,7 @@ PPO
 
 ### P6: Episode Length Mismatch
 **Symptom:** PPO buffer has inconsistent lengths; indexing errors in advantage calculation.
-**Fix:** Episode length = exactly N customer selections + depot returns. Track carefully. Pad shorter episodes in the buffer.
+**Fix:** Episode length = exactly N customer selections + depot returns. Track carefully.
 
 ### P7: Capacity Not Reset on Depot Return
 **Symptom:** After returning to depot, vehicle still has reduced capacity; customers become infeasible.
@@ -89,253 +93,206 @@ PPO
 
 ### P9: Gradient Through Sampling
 **Symptom:** Gradients are None or zero for the policy.
-**Fix:** Use `torch.distributions.Categorical` for sampling, collect `log_prob(action)` for PPO. Don't use `argmax` during training (no gradient).
+**Fix:** Use `torch.distributions.Categorical` for sampling, collect `log_prob(action)` for PPO.
 
 ### P10: kNN Indices Stale After Clustering
 **Symptom:** kNN references nodes from other clusters; index out of bounds.
-**Fix:** Recompute kNN per sub-problem after clustering. kNN is always relative to the current node set.
+**Fix:** Recompute kNN per sub-problem after clustering.
 
 ### P11: Feature Order Mismatch
 **Symptom:** Model trains but performs poorly; amplitude projection learns wrong feature mapping.
 **Fix:** Verify feature order matches thesis §3.X.3: `[d/C, dist, x, y, angle/π]`.
-**Verify:** Print `features[0, 1]` for a known node and manually check each component.
 
 ### P12: Angle Not Normalized by π
 **Symptom:** Feature index [4] has range [-π, π] instead of [-1, 1]; dominates other features.
-**Fix:** Divide atan2 output by `math.pi` — thesis §3.X.3 specifies `αᵢ/π`.
-**Verify:** `assert features[:, :, 4].abs().max() <= 1.0`
+**Fix:** Divide atan2 output by `math.pi`.
 
 ### P13: Tensor on Wrong Device (CUDA/CPU Mismatch)
-**Symptom:** `RuntimeError: Expected all tensors to be on the same device` or
-`RuntimeError: Tensor for argument #2 'mat1' is on CPU, but expected it to be on GPU`.
-**Fix:**
-```python
-# Check at module boundaries
-assert coords.device == demands.device, "coords/demands device mismatch"
-assert next(model.parameters()).device == coords.device, "model/data device mismatch"
-
-# Fix: ensure all tensors go to device at generation time
-coords  = coords.to(device)
-demands = demands.to(device)
-knn_indices = knn_indices.to(device)
-```
-**Root cause:** Tensor created on CPU (default) but model is on CUDA. Always pass `device` to data_generator and knn functions. Never call `.to(device)` inside a module — do it externally in run.py.
+**Symptom:** `RuntimeError: Expected all tensors to be on the same device`
+**Fix:** `.to(device)` on all tensors at generation time. Never hardcode "cuda"/"cpu".
 
 ### P14: CUDA Out of Memory (OOM) on RTX 3050
-**Symptom:** `torch.cuda.OutOfMemoryError: CUDA out of memory. Tried to allocate X GiB`.
-**Hardware limit:** RTX 3050 has 4GB VRAM. ~3.6GB usable after system overhead.
+**Symptom:** `torch.cuda.OutOfMemoryError`
 **Fix sequence:**
 ```python
-# Step 1: reduce batch size
-batch_size = 128   # from 256
-
-# Step 2: clear cache at epoch start
+batch_size = 256    # reduce from 512 if OOM (CVRP-50/100 with B=512)
 torch.cuda.empty_cache()
-
-# Step 3: ensure no_grad during evaluation
 with torch.no_grad():
     results = evaluate(model, val_data)
-
-# Step 4: monitor usage
-used  = torch.cuda.memory_allocated() / 1e9
-total = torch.cuda.get_device_properties(0).total_memory / 1e9
-print(f"VRAM: {used:.2f} / {total:.2f} GB")
 ```
-**Do NOT:** Increase batch_size above 256 for CVRP-100 without testing first.
 
 ---
 
-## 3. Convergence Troubleshooting
+## 3. Training Convergence Diagnostics
+
+### Clip Fraction is the Key Indicator
+
+| clip_fraction | Interpretation | Action |
+|--------------|----------------|--------|
+| < 0.1% | Policy not updating — advantage signal too weak | Reduce entropy_coef; increase batch_size |
+| 0.1% – 2% | Weak updates — borderline | Monitor adv_std |
+| 2% – 15% | **Healthy range** | No action needed |
+| 15% – 30% | Policy changing fast | Reduce LR or increase ppo_epochs |
+| > 30% | Over-clipping — policy unstable | Reduce LR drastically |
+
+**Phase 1 run had clip_fraction = 0.014% (mean) — critically low.**
+Root cause: ENTROPY_COEF=0.05 kept entropy at H=0.55, making sampled ≈ greedy,
+collapsing adv_std to 0.69, PPO ratios all ≈ 1.0.
+
+### adv_std (Advantage Standard Deviation)
+
+| adv_std | Interpretation |
+|---------|---------------|
+| > 1.5 | Strong learning signal — early training |
+| 0.8 – 1.5 | Healthy mid-training |
+| 0.5 – 0.8 | Weakening — monitor |
+| < 0.5 | Near-collapse — policy not exploring enough |
+
+### Entropy Health
+
+| entropy | Interpretation |
+|---------|---------------|
+| > 1.0 | Too random — may not exploit learned policy |
+| 0.5 – 1.0 | **Healthy range** — good exploration/exploitation |
+| 0.3 – 0.5 | Early collapse — raise entropy_coef |
+| < 0.3 | Collapsed — policy deterministic, no more learning |
+
+**Phase 1 run (ENTROPY_COEF=0.05):** entropy = 0.546 at ep200 — never collapsed.
+**Previous runs (ENTROPY_COEF=0.02, eta_min=1e-6):** entropy = 0.41 — collapsed at ep58.
+**Current target (ENTROPY_COEF=0.01, eta_min=1e-5):** maintain 0.5–0.8 while allowing
+policy to commit more, generating larger advantages.
 
 ### Loss Not Decreasing
 
 | Observation | Likely Cause | Fix |
 |------------|-------------|-----|
-| Loss stays flat from start | LR too low or no gradients | Check lr (try 3e-4); verify `requires_grad=True` |
-| Loss oscillates wildly | LR too high or batch too small | Reduce lr (try 3e-5); increase batch_size |
-| Loss decreases then plateaus | PPO clip too tight or entropy low | Increase `eps_clip` to 0.3; increase `c2` to 0.05 |
-| Loss goes to NaN | Numerical instability | Check for log(0), division by zero; use `log_softmax` |
-| Value loss huge, policy okay | Critic underfitting | Increase critic hidden dim; higher lr for critic |
-| Entropy collapses to 0 | Policy collapsed | Increase `c2`; check temperature |
-| Only λ or W_q has gradient | Gradient blocked | Verify psi_prime is not detached; check shared encoder |
+| clip_fraction near 0 | Entropy too high, adv signal zero | Reduce entropy_coef |
+| Loss flat from start | LR too low or no gradients | Check lr, verify requires_grad |
+| Loss → NaN | Numerical instability | Check log(0), div by zero |
+| Value loss huge | Critic underfitting | Increase critic hidden dim |
+| Entropy collapses to 0 | Policy collapsed | Increase entropy_coef |
+| adv_std collapses | Sampled ≈ greedy | Reduce entropy_coef OR increase batch_size |
 
 ### Tour Length Not Improving
 
 | Observation | Likely Cause | Fix |
 |------------|-------------|-----|
-| Stays ~random | Encoder not learning | Check psi vectors aren't identical; verify gradient flow |
-| Good CVRP-20, bad CVRP-50 | Capacity handling bug | Verify capacity reset; check masking for larger N |
-| Plateaus after improvement | kNN not contributing | Check λ gradient; try different k; verify knn_indices |
-| Tours have capacity violations | Masking bug | Print mask at each step |
-| All tours same order | Policy collapsed | Increase c2; verify sampling (not greedy) during training |
-| Improves then worsens | Overfitting or LR too high | Add LR decay; validate regularly |
+| Stays ~random | Encoder not learning | Check gradient flow through encoder |
+| 90% improvement in first 50 epochs, then flat | Advantage signal collapse | Reduce entropy_coef; increase batch_size |
+| Best tour at final epoch | Model still learning at end of run | Increase n_epochs |
+| Plateaus after improvement | LR too low | Check eta_min (must be 1e-5 not 1e-6) |
 
 ---
 
-## 4. Validation Checklist
+## 4. Chart Rendering Bugs (Fixed in v8 Phase 1b)
+
+### Symptom
+Entropy + entropy loss panel and Clip fraction + Lambda panel show overflowing tick labels —
+dense illegible numbers spilling outside the panel boundaries.
+
+### Root Cause
+`matplotlib twinx()` auto-scales both axes independently. When the two axes have very
+different value ranges (e.g. entropy 0.5–1.3 vs entropy_loss 0.025–0.067), matplotlib
+generates hundreds of tick marks that overflow the figure boundary.
+
+### Fix Applied
+```python
+import matplotlib.ticker
+
+# Entropy panel — explicit ylim on both axes
+a21.set_ylim(0.0, max(1.6, max(ent_hist) * 1.1) if ent_hist else 1.6)
+ax_el.set_ylim(0.0, max(eloss_hist) * 1.15)
+ax_el.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
+
+# Clip/Lambda panel — explicit ylim on both axes
+a31.set_ylim(0.0, max(clip_hist) * 1.2 if max(clip_hist) > 0 else 0.1)
+a31.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
+lam_pad = max((lam_max - lam_min) * 0.15, 0.1)
+ax_lam.set_ylim(lam_min - lam_pad, lam_max + lam_pad)
+ax_lam.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
+```
+
+---
+
+## 5. Path / Launch Error
+
+### Symptom
+```
+FileNotFoundError: 'QAP-CVRP\\cvrp-ppo\\datasets\\val_n20.pkl'
+```
+
+### Root Cause
+Script launched from the parent directory with a relative path argument.
+Python resolves `__file__` as a relative path, so `SCRIPT_DIR` becomes relative,
+breaking all dataset path construction.
+
+### Fix — always cd into cvrp-ppo first
+```
+cd D:\Coding\RubyThesis\QAP-CVRP\cvrp-ppo
+python train_n20.py
+```
+
+Or on Machine A:
+```
+cd "C:\Users\ASUS\Downloads\Thesis Code QAP_VRP\cvrp-ppo"
+python train_n20.py
+```
+
+---
+
+## 6. Validation Checklist
 
 Run these checks after implementing each component:
 
-### Encoder Checks
+### Encoder Checks (QAP mode only)
 ```python
-# Unit norm verification
-features = feature_constructor(coords, demands, capacity)
-psi_prime = encoder(features)
 norms = psi_prime.norm(dim=-1)
-assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), \
-    f"Norm violation: min={norms.min():.6f}, max={norms.max():.6f}"
-
-# Shape verification
+assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), "norm violation"
 assert features.shape == (B, N+1, 5)
 assert psi_prime.shape == (B, N+1, 2)
-
-# Feature order verification
-assert features[0, 0, 0].item() == 0.0, "Depot demand ratio should be 0"
-assert features[:, :, 4].abs().max() <= 1.0, "Angle feature should be in [-1, 1]"
-
-# Gradient flow through full encoder
-loss = psi_prime.sum()
-loss.backward()
-for name, p in encoder.named_parameters():
-    assert p.grad is not None, f"No gradient for {name}"
-    assert not torch.isnan(p.grad).any(), f"NaN gradient for {name}"
-
-# Device check
-assert psi_prime.device.type == device.type, "Encoder output on wrong device"
+assert features[0, 0, 0].item() == 0.0, "depot demand ratio should be 0"
+assert features[:, :, 4].abs().max() <= 1.0, "angle feature should be in [-1, 1]"
 ```
 
 ### Decoder Checks
 ```python
-# Masking verification
-mask = get_feasibility_mask(visited, demands, remaining_cap)
-assert mask[:, 0].sum() == 0, "Depot should never be masked"
-assert (log_probs.exp()[mask] < 1e-6).all(), "Infeasible nodes have nonzero prob"
+assert mask[:, 0].sum() == 0, "depot should never be masked"
+assert (log_probs.exp()[mask] < 1e-6).all(), "infeasible nodes have nonzero prob"
+```
 
-# Tour feasibility
+### Tour Feasibility
+```python
 for b in range(B):
     tour = tours[b]
     total_demand = 0
     for node in tour:
-        if node == 0:
-            total_demand = 0
+        if node == 0: total_demand = 0
         else:
             total_demand += demands[b, node]
-            assert total_demand <= capacity, f"Capacity violation at node {node}"
-    customer_visits = [n for n in tour if n != 0]
-    assert len(set(customer_visits)) == N, "Not all customers visited"
-    assert len(customer_visits) == N, "Duplicate visits"
+            assert total_demand <= capacity
+    customers = [n for n in tour if n != 0]
+    assert len(set(customers)) == N
 ```
 
-### PPO Checks
+### PPO Health Checks
 ```python
-# Advantage computation
-assert not torch.isnan(advantages).any(), "NaN in advantages"
-assert advantages.std() > 0, "Zero-variance advantages"
-
-# Ratio check
+assert not torch.isnan(advantages).any()
+assert advantages.std() > 0
 ratio = (new_log_probs - old_log_probs).exp()
-assert (ratio > 0).all(), "Negative ratio — log_prob sign error"
-assert ratio.max() < 100, f"Extreme ratio {ratio.max():.2f}"
+assert (ratio > 0).all()
+assert ratio.max() < 100
+# Healthy clip fraction: 2-15% of steps
+clip_frac = ((ratio < 0.8) | (ratio > 1.2)).float().mean().item()
+assert 0.001 < clip_frac < 0.30, f"Clip fraction {clip_frac:.3f} outside healthy range"
 ```
 
-### Device Checks
-```python
-# All tensors on same device
-assert coords.device.type == device.type,        "coords on wrong device"
-assert demands.device.type == device.type,       "demands on wrong device"
-assert knn_indices.device.type == device.type,   "knn_indices on wrong device"
-assert next(model.parameters()).device.type == device.type, "model on wrong device"
-
-# VRAM usage after each phase (if CUDA)
-if device.type == "cuda":
-    used = torch.cuda.memory_allocated() / 1e9
-    total = torch.cuda.get_device_properties(0).total_memory / 1e9
-    print(f"VRAM after phase: {used:.2f} / {total:.2f} GB")
-```
-
-### Full Pipeline Smoke Test
-```python
-# Tiny end-to-end test: B=2, N=5, train 20 steps
-model = QAPPolicy(opts).to(device)
-optimizer = Adam(model.parameters(), lr=1e-3)
-instance = generate_instance(B=2, N=5, capacity=15, device=device)
-rewards_start = evaluate(model, instance, greedy=True).mean().item()
-for _ in range(20):
-    train_step(model, optimizer, instance)
-rewards_end = evaluate(model, instance, greedy=True).mean().item()
-assert rewards_end > rewards_start, "Model did not improve on trivial instance"
-print(f"Smoke test passed on device: {device}")
-```
-
----
-
-## 5. PyTorch Version Compatibility
-
-### PyTorch 2.0+ with CUDA (RTX 3050)
-Install with cu121 build:
-```bash
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
-Verify:
-```python
-import torch
-assert torch.cuda.is_available(), "CUDA not available — reinstall cu121 build"
-assert torch.cuda.get_device_name(0) == "NVIDIA GeForce RTX 3050"
-```
-
-### PyTorch 2.1+ Specific Issues
-- `ReduceLROnPlateau`: `verbose` kwarg deprecated. Use `verbose=False` or remove.
-- `torch.cuda.amp` moved to `torch.amp`. Update imports if using mixed precision.
-- `torch.compile()` may break custom autograd. Disable if hitting unexplained errors.
-
-### Common Import Patterns
-```python
-# CORRECT
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributions import Categorical
-from torch.optim import Adam
-from torch.utils.tensorboard import SummaryWriter
-
-# WRONG — never import these
-# import pennylane  ← NO quantum libraries
-# import qiskit     ← NO quantum libraries
-```
-
----
-
-## 6. Performance Profiling
-
-### Bottleneck Locations (by frequency)
-1. **kNN computation** — O(N² · B). Precompute once per instance, cache for all decode steps.
-2. **Autoregressive decoding** — N sequential steps, can't parallelize across steps.
-3. **Interference term gather** — `torch.gather` with expanded indices. Pre-expand once, reuse.
-4. **PPO update** — K=3 epochs over full buffer. Minibatch if memory-constrained.
-
-### Memory Optimization (RTX 3050 specific)
-```python
-# Estimated VRAM usage
-# CVRP-20,  B=256: ~0.5 GB  ← safe
-# CVRP-50,  B=256: ~1.0 GB  ← safe
-# CVRP-100, B=256: ~2.0 GB  ← safe
-# CVRP-100, B=512: ~4.0 GB  ← borderline, test first
-
-# If OOM: reduce batch_size first
-batch_size = 128
-
-# Clear cache at epoch boundaries
-torch.cuda.empty_cache()
-
-# Use int32 for kNN indices to save VRAM
-knn_indices = knn_indices.to(torch.int32)
-```
-
-### Speed Tips
-- Move kNN to GPU: `torch.cdist` is GPU-accelerated
-- Use `torch.no_grad()` for all evaluation and greedy rollout
-- Pre-allocate tour tensors: `tours = torch.zeros(B, max_steps, dtype=torch.long, device=device)`
-- Cache `psi_prime` — it doesn't change during decoding
+### OR-Tools Banner Checks
+After `ensure_ortools_ref()` runs, verify it prints:
+- Mean tour length
+- Std + CV%
+- ±2σ expected range
+- 5% gap target (mean × 1.05)
+- Current best model gap (if train_log.jsonl exists)
 
 ---
 
@@ -343,28 +300,23 @@ knn_indices = knn_indices.to(torch.int32)
 
 When encountering an error:
 
-1. **Identify the component:** encoder / decoder / environment / PPO / data / device
-2. **Check P1-P14** (Section 2 above) — especially P13/P14 for CUDA errors
+1. **Identify the component:** encoder / decoder / environment / PPO / data / device / chart
+2. **Check P1-P14** (Section 2 above) — P13/P14 for CUDA, path error for dataset not found
 3. **Verify shapes** against Section 1 cheat sheet
-4. **Run component test** from `tests/` folder
-5. **Add assertions** at suspected failure point
-6. **Minimal reproduction:** Reduce to B=2, N=5, step through manually
-7. **Check device:** `print(tensor.device)` at every module boundary
+4. **Check clip_fraction** in train_log.jsonl — near-zero means advantage collapse
+5. **Minimal reproduction:** Reduce to B=2, N=5 and step through manually
+6. **Check launch directory** — must run from inside cvrp-ppo/
 
 ### Print Debug Template
 ```python
 def debug_step(state, action, scores, mask, psi_prime, query, device):
     print(f"Step {state.step}:")
-    print(f"  Device       : {device}")
+    print(f"  clip_fraction should be 2-15%")
+    print(f"  adv_std should be > 0.8")
+    print(f"  entropy should be 0.5-1.0")
     print(f"  Current node : {state.current_node[0].item()}")
     print(f"  Remaining cap: {state.remaining_cap[0].item():.2f}")
-    print(f"  Visited      : {state.visited[0].nonzero().squeeze().tolist()}")
     print(f"  Action       : {action[0].item()}")
-    print(f"  Mask (infeas): {mask[0].nonzero().squeeze().tolist()}")
-    print(f"  Top-3 scores : {scores[0].topk(3)}")
-    print(f"  Query norm   : {query[0].norm().item():.4f}")
-    print(f"  Psi_prime norm: min={psi_prime[0].norm(dim=-1).min():.4f}, "
-          f"max={psi_prime[0].norm(dim=-1).max():.4f}")
     print(f"  Lambda       : {scoring.lambda_param.item():.4f}")
     if device.type == "cuda":
         used = torch.cuda.memory_allocated() / 1e9

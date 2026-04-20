@@ -2,7 +2,7 @@
 
 **Purpose:** Define the exact file structure, naming conventions, and implementation order for the QAP-DRL codebase.
 **When to reference:** Creating new files, understanding project layout, implementing components.
-**Last updated:** March 2026
+**Last updated:** April 2026
 
 ---
 
@@ -14,13 +14,19 @@ THESIS CODE QAP_VRP/
 ├── cvrp-ppo/                        ← PRIMARY implementation folder
 │   ├── run.py                       ← Main entry point (train/eval)
 │   ├── options.py                   ← All hyperparameters & CLI args
+│   ├── train_n20.py                 ← Self-contained CVRP-20 training  [v8 Phase 1b]
+│   ├── train_n50.py                 ← Self-contained CVRP-50 training  [v8 Phase 1b]
+│   ├── train_n100.py                ← Self-contained CVRP-100 training
+│   ├── train_n10.py                 ← Self-contained CVRP-10 training
+│   ├── train_ablation_n20.py        ← Ablation study: QAP-DRL vs Pure DRL [NEW]
 │   ├── encoder/
 │   │   ├── __init__.py
 │   │   ├── feature_constructor.py   ← 5D feature vector: [d/C, dist, x, y, angle/π]
 │   │   ├── amplitude_projection.py  ← Linear(5→2) + L2 normalize
 │   │   ├── rotation_mlp.py          ← MLP(5→16→1, tanh) for θ_i
 │   │   ├── rotation.py              ← 2D rotation matrix application
-│   │   └── qap_encoder.py           ← Combines all encoder components
+│   │   ├── qap_encoder.py           ← Combines all encoder components + FullEncoder
+│   │   └── baseline_encoder.py      ← Ablation: plain MLP, no norm/rotation [NEW]
 │   ├── decoder/
 │   │   ├── __init__.py
 │   │   ├── context_query.py         ← ContextQueryLayer (4→2, no bias)
@@ -33,76 +39,151 @@ THESIS CODE QAP_VRP/
 │   ├── models/
 │   │   ├── __init__.py
 │   │   └── qap_policy.py            ← QAPPolicy (encoder + decoder + critic)
+│   │                                   accepts encoder_type="qap"|"baseline" [UPDATED]
 │   ├── training/
 │   │   ├── __init__.py
-│   │   ├── ppo_agent.py             ← PPO training loop (GAE, clipped objective)
+│   │   ├── ppo_agent.py             ← PPO training loop [v4: eta_min=1e-5]
 │   │   ├── rollout_buffer.py        ← Experience buffer for PPO
-│   │   └── evaluate.py              ← Greedy evaluation
+│   │   └── evaluate.py              ← evaluate() + evaluate_augmented() [UPDATED]
 │   ├── utils/
 │   │   ├── __init__.py
-│   │   ├── knn.py                   ← kNN precomputation (spatial coords, no self-loops)
+│   │   ├── knn.py                   ← kNN precomputation (k=10 default for N=20)
 │   │   ├── clustering.py            ← K-Means decomposition (§3.X.2)
 │   │   ├── data_generator.py        ← CVRP instance generation (Kool et al. protocol)
 │   │   ├── seed.py                  ← Seed management
 │   │   ├── logger.py                ← TensorBoard + console logging
 │   │   ├── checkpoint.py            ← Save/load model checkpoints
-│   │   └── metrics.py               ← Tour length, optimality gap, etc.
+│   │   ├── metrics.py               ← Tour length, optimality gap, etc.
+│   │   ├── ortools_refs.py          ← OR-Tools reference management [UPDATED: rich banner]
+│   │   └── ortools_solver.py        ← OR-Tools GLS solver [UPDATED: percentiles + timing]
 │   ├── configs/
 │   │   └── default.yaml             ← YAML config (mirrors options.py)
-│   ├── datasets/                    ← Generated validation/test data (.pkl)
-│   ├── outputs/                     ← Checkpoints, logs, results
+│   ├── datasets/
+│   │   ├── val_n20.pkl              ← 2.40 MB, 500+ instances
+│   │   ├── val_n50.pkl              ← 5.84 MB
+│   │   ├── val_n100.pkl             ← 11.56 MB
+│   │   └── ortools_refs.json        ← Cached OR-Tools reference statistics
+│   ├── outputs/
+│   │   ├── n20/                     ← CVRP-20 training outputs
+│   │   │   ├── train_log.jsonl      ← Per-epoch log (all metrics)
+│   │   │   ├── best_model.pt        ← Best checkpoint
+│   │   │   ├── training_curves.png  ← 8-panel chart (4×2)
+│   │   │   ├── best_route.png
+│   │   │   ├── cluster_map.png
+│   │   │   ├── epochs/              ← Per-epoch checkpoints (epoch_001.pt ...)
+│   │   │   └── Archive/             ← Previous runs auto-archived
+│   │   ├── n50/                     ← CVRP-50 training outputs (same structure)
+│   │   └── ablation_n20/            ← Ablation study outputs [NEW]
+│   │       ├── qap/                 ← Full QAP-DRL results
+│   │       ├── baseline/            ← Pure DRL baseline results
+│   │       ├── ablation_comparison.png
+│   │       └── ablation_results.json
 │   └── tests/
 │       ├── test_encoder.py
 │       ├── test_decoder.py
 │       ├── test_env.py
 │       ├── test_shapes.py
-│       └── test_smoke.py            ← End-to-end CVRP-20 smoke test
+│       └── test_smoke.py
 └── ref_code/                        ← VRP-DACT reference (READ-ONLY)
 ```
 
 ---
 
-## 2. Implementation Order
+## 2. Key File Changelogs
 
-Follow this sequence. Each step depends on the previous.
+### `train_n20.py` — v8 Phase 1b (current)
+```
+v4 — ENTROPY_COEF 0.01 → 0.02
+v5 — 6-panel chart
+v6 — eta_min 1e-6 → 1e-5 (ppo_agent.py)
+v7 — 8-panel chart (4×2)
+v8 — Phase 1:
+     ENTROPY_COEF 0.02 → 0.05
+     EPOCH_SIZE 51,200 → 128,000
+     KNN_K 5 → 10
+     evaluate() → evaluate_augmented(×8)
+v8 Phase 1b (current):
+     ENTROPY_COEF 0.05 → 0.01  (0.05 caused advantage signal collapse)
+     BATCH_SIZE 256 → 512      (wider adv distribution, stronger PPO signal)
+     BATCHES_PER_EPOCH = 250   (auto: 128,000 ÷ 512)
+     matplotlib.ticker import  (chart rendering fix)
+     Explicit ylim on twinx panels (entropy, clip/lambda chart bugs fixed)
+```
 
-### Phase 1: Foundation (Days 1-3)
-1. `utils/seed.py` — seed management
-2. `utils/data_generator.py` — CVRP instance generation
-3. `environment/state.py` — StateCVRP dataclass
-4. `environment/cvrp_env.py` — environment with reset/step/reward
-5. `tests/test_env.py` — verify env produces valid episodes
+### `training/evaluate.py` — v2
+```
+Added evaluate_augmented(model, instances, device, n_samples=8):
+  - n_samples stochastic rollouts per instance
+  - torch.minimum element-wise across all samples
+  - Returns mean of per-instance best tours
+  - Zero retraining cost
+```
 
-### Phase 2: Encoder (Days 3-5)
-6. `encoder/feature_constructor.py` — 5D features: `[d/C, dist, x, y, angle/π]`
-7. `encoder/amplitude_projection.py` — Linear(5→2) + L2 norm
-8. `encoder/rotation_mlp.py` — MLP(5→16→1, tanh) for θ
-9. `encoder/rotation.py` — 2D rotation matrix
-10. `encoder/qap_encoder.py` — full encoder pipeline
-11. `tests/test_encoder.py` — verify shapes, unit norms, gradient flow
+### `utils/ortools_solver.py` — v2
+```
+solve_one() now returns (tour_length, solve_time) tuple
+compute_and_save_ref() now stores:
+  - p10, p25, p50, p75, p90 (percentile distribution)
+  - mean_solve_time, max_solve_time, n_time_limited
+```
 
-### Phase 3: Decoder (Days 5-7)
-12. `utils/knn.py` — kNN precomputation (spatial coords, exclude self-loops)
-13. `decoder/context_query.py` — context [ψ'_curr, cap/C, t/N] → query
-14. `decoder/hybrid_scoring.py` — context attention + kNN interference + masking
-15. `decoder/qap_decoder.py` — autoregressive loop with action selection
-16. `tests/test_decoder.py` — verify decoding produces valid feasible tours
+### `utils/ortools_refs.py` — v2
+```
+Added _print_banner() — called on every ensure_ortools_ref() call
+ensure_ortools_ref() gains output_dir parameter (for current best model gap)
+Banner prints: mean, std, CV%, ±2σ range, percentiles, timing, 5% target, current best
+```
 
-### Phase 4: Policy & Training (Days 7-10)
-17. `models/qap_policy.py` — actor (encoder+decoder) + critic (mean-pool → MLP)
-18. `training/rollout_buffer.py` — PPO buffer (states, actions, log_probs, rewards, values)
-19. `training/ppo_agent.py` — PPO loop (GAE advantages, clipped loss, K=3 epochs)
-20. `training/evaluate.py` — greedy evaluation on validation set
-21. `options.py` — all hyperparameters
-22. `run.py` — entry point
-23. `tests/test_smoke.py` — end-to-end CVRP-20 training (5 epochs, verify reward improves)
+### `models/qap_policy.py` — updated
+```
+Added encoder_type parameter: "qap" (default) | "baseline" (ablation)
+When "baseline": uses FullBaselineEncoder instead of FullEncoder
+Import of FullBaselineEncoder added
+```
 
-### Phase 5: Extensions (Days 10+)
-24. `utils/clustering.py` — K-Means for large instances (§3.X.2)
+### `encoder/baseline_encoder.py` — NEW
+```
+BaselineEncoder: Linear(5→2) + ReLU, 12 params, no L2 norm, no rotation
+FullBaselineEncoder: drop-in for FullEncoder, identical interface
+Used by QAPPolicy(encoder_type="baseline") for ablation study
+```
+
+### `train_ablation_n20.py` — NEW
+```
+Runs QAP-DRL and Pure DRL baseline back-to-back under identical conditions
+Same seed, hyperparams, data, validation for both
+Produces: comparison chart, per-epoch logs, verdict table, ablation_results.json
+```
 
 ---
 
-## 3. File-by-File Mapping: DACT → QAP-DRL
+## 3. Implementation Order (original phases complete — current focus)
+
+### Phase 1–4: COMPLETE
+All core components implemented and working.
+
+### Phase 5: Active Work
+
+| Task | Status | File |
+|------|--------|------|
+| Train CVRP-20 Phase 1b | Next run | `train_n20.py` |
+| Train CVRP-50 Phase 1b | After n20 | `train_n50.py` |
+| Ablation study (variant b) | Ready to run | `train_ablation_n20.py` |
+| Phase 2 (amplitude dim 2→4) | After Phase 1b confirmed | TBD |
+| Phase 3 (400 epochs + warm restarts) | After Phase 2 | TBD |
+
+### Gap Reduction Roadmap
+
+| Phase | Changes | Expected gap |
+|-------|---------|-------------|
+| Phase 1 run | ENTROPY=0.05, BATCH=256, kNN=10, aug×8 | ~17% (achieved) |
+| Phase 1b (current) | ENTROPY=0.01, BATCH=512 | target ~12-15% |
+| Phase 2 (arch) | amplitude dim 2→4, rotation hidden 16→32 | target ~7-10% |
+| Phase 3 (longer) | 400 epochs, CosineWarmRestarts | target <5% |
+
+---
+
+## 4. File-by-File Mapping: DACT → QAP-DRL
 
 | DACT File (ref_code/) | QAP-DRL File (cvrp-ppo/) | What Changes |
 |------------------------|--------------------------|--------------|
@@ -112,28 +193,19 @@ Follow this sequence. Each step depends on the previous.
 | `agent/ppo.py` | `training/ppo_agent.py` | **Restructure.** n-step improvement PPO → episode-level constructive PPO with GAE |
 | `problems/vrp/state_vrp.py` | `environment/state.py` | **Rewrite.** Improvement state → constructive MDP state |
 | `problems/vrp/vrp.py` | `environment/cvrp_env.py` | **Rewrite.** Solution refinement env → sequential selection env |
-| `options.py` | `options.py` | **Prune.** Remove DACT-specific args, add QAP-DRL args |
-| `run.py` | `run.py` | **Simplify.** Remove CL, augmentation logic |
-| `utils/functions.py` | `utils/knn.py` + `utils/clustering.py` | **Split.** Keep kNN + add clustering |
 
 ---
 
-## 4. Key Implementation Rules
+## 5. Key Implementation Rules
 
 ### Tensor Conventions
 - **Batch-first:** All tensors shaped `[batch_size, ...]`
 - **Depot at index 0:** Node indexing: 0 = depot, 1..N = customers
 - **Shape comments:** Every tensor operation that changes shape MUST have a shape comment
-- **Device:** Every tensor must be on the same `device` — never mix CPU and CUDA
-
-### Feature Order (Thesis §3.X.3)
-```
-x_i = [d_i/C, dist(i,depot), x_i, y_i, α_i/π]
-         [0]       [1]        [2]  [3]    [4]
-```
+- **Device:** Every tensor must be on the same `device`
 
 ### Critical Invariants
-1. `psi` and `psi_prime` always have L2 norm = 1.0 per vector (atol=1e-5)
+1. `psi` and `psi_prime` always have L2 norm = 1.0 per vector (atol=1e-5) — QAP mode only
 2. `knn_indices` never contain self-loops (diagonal set to inf before topk)
 3. Depot (index 0) is never masked as infeasible
 4. Feasibility mask applied BEFORE softmax (set to -1e9)
@@ -141,111 +213,35 @@ x_i = [d_i/C, dist(i,depot), x_i, y_i, α_i/π]
 6. Demands are integers in [1, 9]; depot demand = 0
 7. Rotation preserves unit norm (no re-normalization needed)
 8. Angle feature is normalized by π → range [-1, 1]
-9. All tensors and models must be on the correct `device`
+9. `psi_prime` DETACHED before critic head in ppo_agent.update()
+10. Run train scripts from inside `cvrp-ppo/` directory (path resolution)
 
 ### What NOT to Implement
 - No curriculum learning (DACT-specific)
-- No 8× data augmentation at inference (DACT-specific)
 - No 2-opt operators or solution improvement
 - No dummy depot nodes (DACT trick)
 - No cyclic positional encoding (DACT-specific)
 - No dual-aspect attention (DACT-specific)
 - No PennyLane/Qiskit/quantum libraries
 
-### Code Style
-- Python 3.10+ type hints
-- Google-style docstrings with shape annotations
-- `import torch.nn.functional as F`
-- `from typing import Optional, Tuple, Dict`
-- Constants in UPPER_CASE
-- Module-level `__all__` exports
-- Thesis equation references in comments
-
 ---
 
-## 5. options.py — Complete Argument Set
+## 6. Training Configuration (Current — Phase 1b)
 
 ```python
-# Problem
---problem         'vrp'
---graph_size      [20, 50, 100]
---capacity        [30, 40, 50]     # auto-matched to graph_size
-
-# QAP-DRL architecture
---embedding_dim   2                # amplitude space dimension (fixed)
---hidden_dim      16               # rotation MLP hidden size (thesis: 16)
---knn_k           5                # interference neighbors
---lambda_init     0.1              # learnable lambda initial value
-
-# Clustering (§3.X.2, for scalability)
---num_clusters    0                # 0 = disabled
-
-# PPO
---K_epochs        3
---eps_clip        0.2
---gamma           0.99
---gae_lambda      0.95
---c1              0.5
---c2              0.01
-
-# Training schedule
---n_epochs        100
---epoch_size      128000
---batch_size      256              # RTX 3050 default (raise to 512 only if no OOM)
---lr_model        1e-4
---lr_critic       1e-4
---max_grad_norm   1.0
-
-# Evaluation
---val_size        10000
---eval_batch_size 256
---decode_strategy 'greedy'
-
-# Sensitivity analysis
---perturbation_strength  0.05
---perturbation_freq      'episode'
-
-# Logging
---run_name        'qap_drl_run'
---output_dir      'outputs'
---log_dir         'logs'
---checkpoint_epochs 1
---seed            1234
-```
-
----
-
-## 6. Environment State Design
-
-```python
-@dataclass
-class StateCVRP:
-    """Constructive MDP state for CVRP."""
-    coords: torch.Tensor          # [B, N+1, 2]
-    demands: torch.Tensor         # [B, N+1]
-    capacity: float               # scalar C
-    visited: torch.Tensor         # [B, N+1] boolean
-    current_node: torch.Tensor    # [B] int — current position
-    remaining_cap: torch.Tensor   # [B] float — remaining vehicle capacity
-    step: int                     # current decoding step (0 to N-1)
-    tour: list                    # [B, step] — sequence of visited nodes
-    total_distance: torch.Tensor  # [B] float — accumulated distance
-    all_done: bool                # True when all customers visited
-```
-
-### Episode Flow
-```
-reset() → initial state (at depot, nothing visited, full capacity)
-    ↓
-for step in range(max_steps):
-    action = policy(state)        # select next customer (or depot)
-    state = env.step(action)      # update visited, capacity, distance
-    if action == depot:           # vehicle returns to depot
-        remaining_cap = C         # reset capacity for new route
-    if all customers visited:
-        break
-done → return to depot, compute total distance
-reward = -total_distance
+# train_n20.py settings
+GRAPH_SIZE        = 20
+CAPACITY          = 30
+BATCH_SIZE        = 512       # Phase 1b: was 256
+N_EPOCHS          = 200
+EPOCH_SIZE        = 128_000   # thesis spec
+LR                = 1e-4
+ENTROPY_COEF      = 0.01      # Phase 1b: was 0.05 (caused adv collapse)
+VALUE_COEF        = 0.5
+KNN_K             = 10        # Phase 1: was 5
+AUG_SAMPLES       = 8         # inference augmentation
+BATCHES_PER_EPOCH = 250       # 128,000 ÷ 512
+TOTAL_OPT_STEPS   = 1_200_000 # 200 × 250 × 3 × 8
 ```
 
 ---
@@ -257,27 +253,23 @@ reward = -total_distance
 # 2. Set seeds (utils/seed.py)
 # 3. Detect device — ONCE here, pass everywhere
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Device: {device}")
-if device.type == "cuda":
-    print(f"  GPU : {torch.cuda.get_device_name(0)}")
-    print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB")
-# 4. Create data generator (utils/data_generator.py) — pass device
-# 5. Create environment (environment/cvrp_env.py)
-# 6. Create QAPPolicy (encoder + decoder + critic) → .to(device)
-# 7. Create PPO agent (training/ppo_agent.py) — pass device
-# 8. Load checkpoint if --load_path
-# 9. If --eval_only: evaluate and exit
+# 4. Load OR-Tools reference (ensure_ortools_ref) — prints banner before training
+# 5. Create data generator (utils/data_generator.py) — pass device
+# 6. Create environment (environment/cvrp_env.py)
+# 7. Create QAPPolicy (encoder_type="qap") → .to(device)
+# 8. Create PPO agent (training/ppo_agent.py) — pass device
+# 9. Load checkpoint if resuming (auto-resume from epochs/*.pt)
 # 10. Training loop:
 #    for epoch in range(n_epochs):
-#        torch.cuda.empty_cache()          ← clear VRAM each epoch
+#        torch.cuda.empty_cache()
 #        generate training data (fresh each epoch, on device)
 #        collect rollouts (forward pass through env)
-#        PPO update (K_epochs inner loop, GAE advantages)
-#        evaluate on validation set (greedy, torch.no_grad())
-#        log: reward, tour_length, feasibility_rate, entropy, loss
-#        log VRAM usage if CUDA
-#        save checkpoint
-# 11. Final evaluation on test set
+#        PPO update (K=3 inner epochs, GAE advantages, normalized)
+#        evaluate_augmented() on validation set (n_samples=8)
+#        log all 15+ metrics to train_log.jsonl
+#        save epoch checkpoint
+#        redraw 8-panel chart (training_curves.png)
+# 11. Save best_model.pt, best_route.png, cluster_map.png
 ```
 
 ---
@@ -301,9 +293,7 @@ if device.type == "cuda":
 
 | Problem | batch_size | Est. VRAM | Recommendation |
 |---------|-----------|-----------|----------------|
-| CVRP-20 | 256 | ~0.5 GB | ✓ Safe default |
-| CVRP-50 | 256 | ~1.0 GB | ✓ Safe default |
+| CVRP-20 | 512 | ~1.0 GB | ✓ Safe (Phase 1b) |
+| CVRP-50 | 512 | ~2.0 GB | ✓ Safe |
 | CVRP-100 | 256 | ~2.0 GB | ✓ Safe default |
 | CVRP-100 | 512 | ~4.0 GB | ⚠ Test first, may OOM |
-
-If OOM: reduce to `batch_size=128`, add `torch.cuda.empty_cache()` more frequently.

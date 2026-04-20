@@ -4,6 +4,7 @@
 **Thesis:** "QAP-DRL for Clustered Vehicle Routing Problems" — IU HCMC, 2025
 **Target folder:** `cvrp-ppo/` — ALL implementation goes here
 **Language:** Python 3.10+, PyTorch ≥ 2.0 (CUDA build — see Section 16)
+**Last updated:** April 2026
 
 > **Golden rule:** Implement exactly as specified below. No improvements, no extras,
 > no quantum libraries (PennyLane, Qiskit, etc.). This is quantum-INSPIRED classical code.
@@ -15,6 +16,17 @@
 A **constructive** DRL solver for CVRP. The agent builds routes from scratch by
 selecting the next customer at each step. It is NOT an improvement solver (no 2-opt,
 no solution refinement). It is NOT transformer-based. It is NOT using real quantum hardware.
+
+**Two machines:**
+- Machine A: `C:\Users\ASUS\Downloads\Thesis Code QAP_VRP\cvrp-ppo\`
+- Machine B: `D:\Coding\RubyThesis\QAP-CVRP\cvrp-ppo\`
+
+**ALWAYS run from inside cvrp-ppo/:**
+```
+cd D:\Coding\RubyThesis\QAP-CVRP\cvrp-ppo
+python train_n20.py
+```
+Running from a parent directory breaks dataset path resolution (`__file__` becomes relative).
 
 ---
 
@@ -40,6 +52,9 @@ CVRP Input [coords, demands, capacity]
 Optimised Routes
 ```
 
+**Ablation variant (b):** Steps [3] and [4] replaced by `Linear(5→2) + ReLU` (no norm, no rotation).
+Activated via `QAPPolicy(encoder_type="baseline")`. Run via `train_ablation_n20.py`.
+
 ---
 
 ## 3. Tensor Shapes (cheat sheet)
@@ -50,14 +65,17 @@ INPUT
   demands:             [B, N+1]         demands[:,0] = 0  (depot)
   capacity:            scalar float
 
-ENCODER
+ENCODER — QAP mode (default)
   features:            [B, N+1, 5]      order: [d/C, dist, x, y, angle/π]
   psi (projected):     [B, N+1, 2]      ← MUST be unit norm
   theta (from MLP):    [B, N+1]
   psi_prime (rotated): [B, N+1, 2]      ← MUST be unit norm
 
+ENCODER — baseline mode (ablation)
+  embedding:           [B, N+1, 2]      ← NOT unit norm (ReLU output, 12 params)
+
 KNN  (precomputed once per instance, reused every decode step)
-  knn_indices:         [B, N+1, k]      k=5, no self-loops
+  knn_indices:         [B, N+1, k]      k=10 for CVRP-20, k=5 for CVRP-50/100
 
 DECODER (per step t)
   psi_curr:            [B, 2]           zero vector if at depot
@@ -69,7 +87,7 @@ DECODER (per step t)
   log_probs:           [B, N+1]         log_softmax(masked scores)
   action:              [B]
 
-CRITIC
+CRITIC (psi_prime DETACHED before this)
   pooled:              [B, 2]           mean(psi_prime, dim=1)
   value:               [B]
 
@@ -122,7 +140,7 @@ P(j)     = softmax(Score(j))   [infeasible masked to -1e9 BEFORE softmax]
 ```
 r_t     = π_new(a|s) / π_old(a|s)
 L_clip  = -E[min(r_t·A_t, clip(r_t, 1-ε, 1+ε)·A_t)]
-L_value = MSE(V(s_t), R_t)
+L_value = MSE(V(s_t), R_t)   [psi_prime DETACHED]
 L_ent   = -H[π(·|s_t)]
 L_total = L_clip + c1·L_value + c2·L_ent
 ```
@@ -141,10 +159,11 @@ L_total = L_clip + c1·L_value + c2·L_ent
 | Critic MLP         | 2→64→1       | ~257   |
 | **Actor total**    |              | **~134** |
 | **Full total**     |              | **~391** |
+| **Baseline total** | (no proj+rot)| **~278** |
 
 ---
 
-## 6. Hyperparameters (locked)
+## 6. Current Hyperparameters — Phase 1b (v8)
 
 ```python
 # Problem
@@ -152,23 +171,30 @@ graph_size   : [20, 50, 100]
 capacity     : {20: 30, 50: 40, 100: 50}   # Kool et al. 2019
 
 # Architecture
-embedding_dim : 2       hidden_dim : 16     knn_k      : 5
+embedding_dim : 2       hidden_dim : 16
+knn_k         : 10      # Phase 1: was 5 (CVRP-20); use 5 for CVRP-50/100
 lambda_init   : 0.1
 
 # PPO
 K_epochs  : 3       eps_clip  : 0.2     gamma     : 0.99
-gae_lambda: 0.95    c1        : 0.5     c2        : 0.01
+gae_lambda: 0.95    c1        : 0.5     c2        : 0.01  # thesis spec — NOT 0.05
 
 # Training
 lr            : 1e-4
-batch_size    : 256     # ← RTX 3050 4GB default; raise to 512 only if no OOM
-epoch_size    : 128_000
-n_epochs      : 100
+eta_min       : 1e-5          # v4 fix: was 1e-6 — caused training freeze
+batch_size    : 512           # Phase 1b: was 256 — stronger advantage signal
+epoch_size    : 128_000       # thesis spec — was 51,200
+n_epochs      : 200
 max_grad_norm : 1.0
+aug_samples   : 8             # inference augmentation (evaluate_augmented)
+
+# Auto-calculated
+batches_per_epoch : 250       # 128,000 ÷ 512
+total_opt_steps   : 1_200_000 # 200 × 250 × 3 × 8
 
 # Evaluation
-val_size        : 10_000
-decode_strategy : 'greedy'
+val_size        : 500         # VAL_EVAL_SIZE
+decode_strategy : 'augmented' # evaluate_augmented(n_samples=8)
 seed            : 1234
 ```
 
@@ -186,7 +212,7 @@ capacity = {20: 30, 50: 40, 100: 50}[N]
 
 ---
 
-## 8. File Structure
+## 8. File Structure (current)
 
 ```
 THESIS CODE QAP_VRP/
@@ -194,68 +220,68 @@ THESIS CODE QAP_VRP/
 ├── cvrp-ppo/
 │   ├── run.py
 │   ├── options.py
+│   ├── train_n20.py              ← v8 Phase 1b [ACTIVE]
+│   ├── train_n50.py              ← v8 Phase 1b [ACTIVE]
+│   ├── train_n100.py
+│   ├── train_n10.py
+│   ├── train_ablation_n20.py     ← NEW: ablation study
 │   ├── encoder/
-│   │   ├── feature_constructor.py     [d/C, dist, x, y, angle/π]
-│   │   ├── amplitude_projection.py    Linear(5→2) + L2 norm
-│   │   ├── rotation_mlp.py            MLP(5→16→1, tanh)
-│   │   ├── rotation.py                R(θ)·ψ
-│   │   └── qap_encoder.py             combines all 4
+│   │   ├── feature_constructor.py
+│   │   ├── amplitude_projection.py
+│   │   ├── rotation_mlp.py
+│   │   ├── rotation.py
+│   │   ├── qap_encoder.py
+│   │   └── baseline_encoder.py   ← NEW: pure DRL baseline
 │   ├── decoder/
-│   │   ├── context_query.py           W_q(4→2, no bias)
-│   │   ├── hybrid_scoring.py          context + kNN + masking
-│   │   └── qap_decoder.py             autoregressive loop
 │   ├── environment/
-│   │   ├── cvrp_env.py
-│   │   └── state.py
 │   ├── models/
-│   │   └── qap_policy.py              actor + critic (shared encoder)
+│   │   └── qap_policy.py         ← UPDATED: encoder_type param
 │   ├── training/
-│   │   ├── ppo_agent.py
+│   │   ├── ppo_agent.py          ← v4: eta_min=1e-5
 │   │   ├── rollout_buffer.py
-│   │   └── evaluate.py
+│   │   └── evaluate.py           ← UPDATED: evaluate_augmented()
 │   ├── utils/
-│   │   ├── knn.py                     spatial coords, no self-loops
-│   │   ├── clustering.py              K-Means (N≥100)
+│   │   ├── knn.py
 │   │   ├── data_generator.py
-│   │   ├── seed.py
-│   │   ├── logger.py
-│   │   ├── checkpoint.py
-│   │   └── metrics.py
-│   ├── configs/default.yaml
+│   │   ├── ortools_refs.py       ← UPDATED: rich banner
+│   │   └── ortools_solver.py     ← UPDATED: percentiles + timing
 │   ├── datasets/
-│   ├── outputs/
-│   └── tests/
-│       ├── test_env.py
-│       ├── test_encoder.py
-│       ├── test_decoder.py
-│       └── test_smoke.py
-└── ref_code/                          ← READ-ONLY
+│   │   ├── val_n20.pkl
+│   │   ├── val_n50.pkl
+│   │   ├── val_n100.pkl
+│   │   └── ortools_refs.json
+│   └── outputs/
+│       ├── n20/
+│       ├── n50/
+│       └── ablation_n20/         ← NEW
+└── ref_code/                     ← READ-ONLY
 ```
 
 ---
 
-## 9. Implementation Order
+## 9. Implementation Order (for new components)
 
-**Phase 1 — Foundation:** seed → data_generator → state → cvrp_env → test_env
-**Phase 2 — Encoder:** feature_constructor → amplitude_projection → rotation_mlp → rotation → qap_encoder → test_encoder
-**Phase 3 — Decoder:** knn → context_query → hybrid_scoring → qap_decoder → test_decoder
-**Phase 4 — Training:** qap_policy → rollout_buffer → ppo_agent → evaluate → options → run → test_smoke
-**Phase 5 — Extensions:** clustering
+**Phases 1–4 are COMPLETE.** Current work:
 
-Do NOT move to next phase until the phase test passes.
+1. Run Phase 1b training: `python train_n20.py` (from inside cvrp-ppo/)
+2. Run ablation: `python train_ablation_n20.py`
+3. If Phase 1b gap < 15%: proceed to Phase 2 (amplitude dim 2→4)
+4. Phase 3: 400 epochs + CosineAnnealingWarmRestarts
 
 ---
 
 ## 10. Critical Rules
 
 ### ALWAYS
-- `F.normalize(..., p=2, dim=-1)` after amplitude projection
+- `F.normalize(..., p=2, dim=-1)` after amplitude projection (QAP mode)
 - `scores[mask] = -1e9` BEFORE `F.log_softmax`
 - `mask[:, 0] = False` — depot NEVER masked
 - Diagonal = `inf` before kNN topk (no self-loops)
 - Shape comment on every tensor op
 - `Categorical.sample()` + `.log_prob()` during training
 - Every tensor and model `.to(device)`
+- `psi_prime.detach()` before critic head in ppo_agent
+- `import matplotlib.ticker` in all train files (chart rendering)
 
 ### NEVER
 - Quantum libraries (PennyLane, Qiskit)
@@ -263,7 +289,8 @@ Do NOT move to next phase until the phase test passes.
 - `argmax` during training
 - Re-normalise after rotation
 - Hardcode `"cuda"` or `"cpu"`
-- 2-opt, curriculum learning, inference augmentation
+- 2-opt, curriculum learning
+- Run from parent directory (path bug)
 
 ---
 
@@ -271,7 +298,7 @@ Do NOT move to next phase until the phase test passes.
 
 | # | Pitfall | Fix |
 |---|---------|-----|
-| P1 | Missing L2 norm | `F.normalize(..., p=2, dim=-1)` |
+| P1 | Missing L2 norm | `F.normalize(..., p=2, dim=-1)` — QAP mode only |
 | P2 | Mask after softmax | -1e9 BEFORE log_softmax |
 | P3 | Depot masked | `mask[:, 0] = False` |
 | P4 | kNN self-loops | `diagonal.fill_(inf)` before topk |
@@ -284,14 +311,17 @@ Do NOT move to next phase until the phase test passes.
 | P11 | argmax during training | `Categorical.sample()` |
 | P12 | λ as float | `nn.Parameter(torch.tensor(0.1))` |
 | P13 | Tensor on wrong device | `.to(device)` everywhere |
-| P14 | OOM RTX 3050 | batch_size=128; `torch.cuda.empty_cache()` |
+| P14 | OOM RTX 3050 | batch_size=256; `torch.cuda.empty_cache()` |
+| P15 | Path error (FileNotFoundError) | cd into cvrp-ppo/ before running |
+| P16 | Chart tick overflow | `import matplotlib.ticker`; explicit `set_ylim` on twinx axes |
+| P17 | Advantage collapse (clip≈0) | Reduce entropy_coef; do not exceed 0.02 |
 
 ---
 
 ## 12. Validation Checklist
 
 ```python
-# Encoder
+# Encoder (QAP mode)
 assert features.shape == (B, N+1, 5)
 assert psi_prime.shape == (B, N+1, 2)
 assert features[:, 0, 0].sum() == 0,       "depot demand ratio must be 0"
@@ -311,9 +341,11 @@ for tour in tours:
         if node == 0: cap = capacity
         else: cap -= demands[node]; assert cap >= 0
 
-# PPO
+# PPO — CRITICAL: check clip_fraction
 ratio = (new_log_probs - old_log_probs).exp()
 assert (ratio > 0).all() and ratio.max() < 100
+clip_frac = ((ratio < 0.8) | (ratio > 1.2)).float().mean()
+assert clip_frac > 0.001, "Advantage signal collapsed — reduce entropy_coef"
 
 # Device
 assert next(model.parameters()).device.type == device.type
@@ -324,7 +356,7 @@ assert next(model.parameters()).device.type == device.type
 ## 13. Smoke Test
 
 ```python
-model = QAPPolicy(opts).to(device)
+model = QAPPolicy(knn_k=10, encoder_type="qap").to(device)
 opt   = Adam(model.parameters(), lr=1e-3)
 inst  = generate_instance(B=2, N=5, capacity=15, device=device)
 r_start = evaluate(model, inst, greedy=True).mean().item()
@@ -340,9 +372,10 @@ assert r_end > r_start, f"no improvement: {r_start:.3f} → {r_end:.3f}"
 
 ```
 x_i      = [d_i/C, ‖i-depot‖, x_i, y_i, atan2(Δy,Δx)/π]
-ψ_i      = normalize(W·x_i + b),  ‖ψ_i‖=1
-θ_i      = tanh_MLP(5→16→1)(x_i)
-ψ'_i     = R(θ_i)·ψ_i,  ‖ψ'_i‖=1
+ψ_i      = normalize(W·x_i + b),  ‖ψ_i‖=1      (QAP mode)
+θ_i      = tanh_MLP(5→16→1)(x_i)               (QAP mode)
+ψ'_i     = R(θ_i)·ψ_i,  ‖ψ'_i‖=1              (QAP mode)
+embed_i  = ReLU(W·x_i),  no norm               (baseline mode)
 ctx_t    = [ψ'_curr, cap_t/C, t/N]
 q_t      = W_q · ctx_t
 Score(j) = q_t·ψ'_j + λ·Σ_{kNN}(ψ'_i·ψ'_j)
@@ -375,67 +408,52 @@ L        = L_clip + c1·L_value + c2·L_entropy
 import torch
 print(torch.cuda.is_available())           # must be True
 print(torch.cuda.get_device_name(0))       # NVIDIA GeForce RTX 3050
-print(torch.cuda.get_device_properties(0).total_memory / 1e9)  # ~4.29 GB
 ```
 
-If False — reinstall PyTorch with CUDA:
-```bash
-pip uninstall torch torchvision torchaudio -y
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-```
+### VRAM Budget
 
-### Device Pattern (use in every file)
-```python
-# run.py — detect ONCE, pass everywhere as argument
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
-if device.type == "cuda":
-    print(f"  GPU : {torch.cuda.get_device_name(0)}")
-    print(f"  VRAM: {torch.cuda.get_device_properties(0).total_memory/1e9:.1f} GB")
-```
-
-### Per-File Device Rules
-| File | Required action |
-|------|----------------|
-| `run.py` | Detect device, pass to all modules |
-| `data_generator.py` | Accept `device` arg; `.to(device)` on all output tensors |
-| `qap_policy.py` | `model.to(device)` called externally from run.py |
-| `knn.py` | `knn_indices.to(device)` before return |
-| `rollout_buffer.py` | All stored tensors `.to(device)` |
-| `ppo_agent.py` | `torch.cuda.empty_cache()` at epoch start |
-| `evaluate.py` | `torch.no_grad()` block; tensors on device |
-
-### VRAM Budget (RTX 3050, 4GB)
-
-| Problem | batch_size | Est. VRAM | Status |
-|---------|-----------|-----------|--------|
-| CVRP-20 | 256 | ~0.5 GB | ✓ Safe |
-| CVRP-50 | 256 | ~1.0 GB | ✓ Safe |
+| Problem | batch_size | VRAM | Status |
+|---------|-----------|------|--------|
+| CVRP-20 | 512 | ~1.0 GB | ✓ Safe (Phase 1b) |
+| CVRP-50 | 512 | ~2.0 GB | ✓ Safe |
 | CVRP-100 | 256 | ~2.0 GB | ✓ Safe |
-| CVRP-100 | 512 | ~4.0 GB | ⚠ Borderline — test first |
-
-**Default: batch_size = 256**
-
-### OOM Recovery
-```python
-# Step 1: reduce batch
-batch_size = 128
-
-# Step 2: clear cache more often
-torch.cuda.empty_cache()   # start of every epoch
-
-# Step 3: monitor
-used  = torch.cuda.memory_allocated() / 1e9
-total = torch.cuda.get_device_properties(0).total_memory / 1e9
-print(f"VRAM: {used:.2f} / {total:.2f} GB")
-```
+| CVRP-100 | 512 | ~4.0 GB | ⚠ Borderline |
 
 ### Training Time Estimates
 
-| Problem | Time/epoch | 100 epochs total |
-|---------|-----------|-----------------|
-| CVRP-20 | ~3–5 min | ~5–8 hrs |
-| CVRP-50 | ~8–12 min | ~13–20 hrs |
-| CVRP-100 | ~20–30 min | ~33–50 hrs |
+| Problem | Time/epoch | 200 epochs |
+|---------|-----------|------------|
+| CVRP-20 (B=512) | ~4–6 min | ~13–20 hrs |
+| CVRP-50 (B=512) | ~10–15 min | ~33–50 hrs |
 
-Save checkpoints every epoch. Train CVRP-100 overnight.
+---
+
+## 17. OR-Tools Reference
+
+Runs automatically via `ensure_ortools_ref()` before training. Cached in `datasets/ortools_refs.json`.
+
+**CVRP-20 (cached):**
+- mean_tour = 6.1915
+- std_tour = 0.8048
+- 5% target = ≤ 6.5011 (this is the number the model must beat)
+
+Percentile fields (p10–p90) and timing stats added in ortools_solver.py v2 — will populate on next fresh run.
+
+---
+
+## 18. Training Results History (CVRP-20)
+
+| Run | entropy_coef | batch | eta_min | Best tour | Gap | Key finding |
+|-----|-------------|-------|---------|-----------|-----|-------------|
+| Run 2 | 0.01 | 256 | 1e-6 | 7.640 | 23.4% | LR froze at ep160 |
+| Run 3 | 0.02 | 256 | 1e-6 | 7.685 | 24.1% | LR froze |
+| Run 4 | 0.02 | 256 | 1e-6 | 7.679 | 24.0% | LR froze |
+| Run 5 | 0.02 | 256 | **1e-5** | 7.668 | 23.8% | LR fix confirmed |
+| Phase 1 | 0.05 | 256 | 1e-5 | 7.228 | 17.1% | adv collapse ep50 |
+| Phase 1b | **0.01** | **512** | 1e-5 | pending | target <15% | — |
+
+**Key lessons learned:**
+1. `eta_min=1e-6` → LR decays to near-zero → policy freezes (all runs before Run 5)
+2. `entropy_coef=0.05` → entropy stays at 0.55 (good) but adv_std → 0.69, clip_frac → 0.014% (bad)
+3. Root cause of stall: not entropy collapse but advantage signal collapse from over-exploration
+4. Fix: thesis spec `entropy_coef=0.01` + `batch_size=512` for stronger gradients
