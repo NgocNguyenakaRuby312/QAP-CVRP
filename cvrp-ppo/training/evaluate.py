@@ -6,36 +6,11 @@ Greedy and augmented rollout evaluation.
     evaluate(model, instances, device, greedy=True) → mean_tour_length: float
     evaluate_augmented(model, instances, device, n_samples=8) → mean_best_tour: float
 
-IMPORTANT — Change 3 compatibility:
-    Change 3 (dynamic encoder, per-step re-encoding) makes stochastic augmentation
-    INVALID. Here is why:
-
-    Original architecture (no Change 3):
-        - encoder runs ONCE → fixed psi_prime for all decode steps
-        - 8 stochastic samples all operate on the SAME psi_prime landscape
-        - torch.minimum across 8 samples is meaningful: best exploration of same space
-
-    With Change 3 active:
-        - encoder re-runs at EVERY decode step using dist(i, v_t) as feature[5]
-        - each stochastic sample takes different actions → different v_t at each step
-        → different psi_prime at each step → different embedding space per sample
-        - torch.minimum across 8 samples compares tours from 8 DIFFERENT spaces
-        → meaningless, produces WORSE results than greedy (confirmed: 8.43 vs 7.64)
-
-    Fix:
-        evaluate_augmented() now uses COORDINATE AUGMENTATION instead of
-        stochastic sampling. For each of n_samples, it applies one of 8 standard
-        geometric transforms (rotations + reflections) to the instance coordinates,
-        runs GREEDY decoding, transforms the tour length back (distance is invariant
-        to rigid transforms), and takes the minimum across all transformed instances.
-
-        This is valid with Change 3 because:
-        - Each sample is a GREEDY rollout on a TRANSFORMED instance
-        - greedy is deterministic → encoder sees consistent v_t sequence per sample
-        - distance is preserved under rotation/reflection (isometry)
-        - Different transforms create genuinely different routing problems → real diversity
-
-        If n_samples=1, falls back to plain greedy (no augmentation overhead).
+Augmentation strategy: coordinate augmentation + greedy decoding.
+    8 standard geometric transforms (rotations + reflections) of the unit square.
+    Greedy decoding on each transformed instance.
+    Tour length computed on original coords (distance-invariant).
+    torch.minimum across 8 greedy runs → valid diversity from different orientations.
 
 AUGMENTATION TRANSFORMS (8 standard for unit square [0,1]^2):
     T0: identity           (x,  y)
@@ -133,30 +108,18 @@ def evaluate_augmented(
     n_samples: int = 8,
 ) -> float:
     """
-    Augmented evaluation compatible with Change 3 (dynamic per-step re-encoding).
-
-    Strategy: coordinate augmentation + greedy decoding.
+    Augmented evaluation: coordinate augmentation + greedy decoding.
 
     For each of n_samples transforms:
         1. Apply a geometric transform to instance coordinates
-        2. Run GREEDY decoding (deterministic, not stochastic)
-        3. Compute tour length (invariant to isometric transforms)
+        2. Run GREEDY decoding (deterministic)
+        3. Compute tour length on original coords (distance-invariant)
     Take the per-instance minimum across all n_samples transforms.
     Return the mean of per-instance best tour lengths.
 
-    WHY GREEDY + COORD AUG instead of STOCHASTIC + SAME COORDS:
-        With Change 3 active, the encoder is re-run at every decode step
-        using dist(i, v_t) as feature[5]. Stochastic sampling causes
-        different action sequences → different v_t → different psi_prime
-        at every step across samples → incomparable embedding spaces.
-        Greedy is deterministic given the instance, so each augmented
-        instance is self-consistent throughout its rollout.
-
-    WHY COORD AUG PRODUCES DIVERSITY:
-        A rotation/reflection of the unit square creates a geometrically
-        equivalent but visually different routing problem. The model may
-        find different local optima on different orientations. Taking the
-        minimum captures the best solution found across orientations.
+    8 isometric transforms of the unit square are used. Each creates a
+    geometrically equivalent but differently-oriented routing problem,
+    providing genuine diversity for the minimum search.
 
     Args:
         model:     QAPPolicy (already on device)

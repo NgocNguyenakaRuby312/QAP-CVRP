@@ -18,26 +18,11 @@ FIX LOG:
     - LOGGING: update() now returns a full diagnostic dict (15+ fields).
   v4:
     - eta_min raised 1e-6 → 1e-5 in CosineAnnealingLR.
-      Root cause of training stall confirmed across 3 runs: LR decaying
-      to 1e-6 makes gradient steps too small to overcome entropy penalty,
-      freezing the policy from ~epoch 160 onward regardless of entropy_coef.
-      At eta_min=1e-5 the LR floor is 10× higher, keeping updates alive
-      through all 200 epochs.
   v5 (Changes 1+2):
     - update() diagnostic dict now also returns mu_val — the current value
       of the learnable distance penalty scalar μ (Change 1, §3.3.4).
-  v6 (Change 3):
-    - collect_rollout() sampled pass now passes encoder reference to
-      decoder.rollout() so that feature[5]=dist(i,vₜ) is computed at
-      each decoding step with the actual vehicle position (Change 3).
-    - Greedy baseline pass likewise passes encoder reference.
-    - update() minibatch path: feature_builder called without
-      current_node_coords → feature[5] falls back to dist(i,depot),
-      which is correct since evaluate_actions() rebuilds per-step
-      features internally with cur_coords_3d (Change 3 in qap_policy.py).
-    - Critic value head still uses initial psi_prime_mb (t=0 encode) —
-      acceptable since the critic uses mean-pooled representations and
-      does not need per-step proximity features.
+    - collect_rollout() uses static encoder: no per-step re-encoding.
+    - Encoder is STATIC: psi_prime computed once, fixed for all decode steps.
 """
 
 import os
@@ -131,9 +116,8 @@ class PPOTrainer:
         """
         Collect one rollout (sampled + greedy baseline).
 
-        Change 3 (v6): encoder reference passed to decoder.rollout() so that
-        feature[5]=dist(i,vₜ) is recomputed at each step with actual vehicle
-        position. For baseline encoder_type, encoder=None (no Change 3).
+        Encoder is STATIC: psi_prime computed once before decoding loop,
+        fixed for all decode steps. No per-step re-encoding.
 
         Stores diagnostic stats in self._rollout_stats.
         Returns mean sampled tour length (positive distance).
@@ -144,44 +128,27 @@ class PPOTrainer:
         self.buffer.clear()
         self.policy.eval()
 
-        # Change 3: pass encoder ref for per-step re-encoding (QAP mode only)
-        enc_ref = (self.policy.encoder
-                   if self.policy.encoder_type == "qap" else None)    # Change 3
-
         with torch.no_grad():
             state_sample = self.env.reset(instance)
-            # Initial encode — current_node_coords=None → feature[5]=dist(i,depot)
-            psi_prime, _, knn_indices = self.policy.encoder(state_sample)
+            # Encode ONCE — psi_prime fixed for all decode steps
+            psi_prime, _, knn_indices = self.policy.encoder(state_sample)  # [B,N+1,2]
             self._last_knn = knn_indices
 
             # ── Pass 1: Sampled rollout ────────────────────────────────
-            # Change 3: re-encode per step with current vehicle coords
+            # psi_prime is static — same for every decode step
             all_actions       = []
-            all_log_probs_buf = []
             state             = state_sample
-            device            = psi_prime.device
-            B                 = psi_prime.shape[0]
-            psi_step          = psi_prime
 
             max_steps = 3 * n_cust + 1
             for step in range(max_steps):
                 if state["done"].all():
                     break
 
-                # Change 3: re-encode with current vehicle coords
-                if enc_ref is not None:
-                    cur_idx    = state["current_node"]                 # [B]
-                    cur_coords = state["coords"][
-                        torch.arange(B, device=device), cur_idx        # [B, 2]
-                    ]
-                    feats_t   = enc_ref.build_features(state, cur_coords)  # [B, N+1, 6]
-                    psi_step  = enc_ref.qap_encoder(feats_t)               # [B, N+1, 2]
-
                 log_probs, _ = self.policy.decoder(
-                    state, psi_step, knn_indices, step, n_cust
+                    state, psi_prime, knn_indices, step, n_cust    # [B, N+1]
                 )
                 dist   = torch.distributions.Categorical(logits=log_probs)
-                action = dist.sample()
+                action = dist.sample()                                 # [B]
                 log_p  = log_probs.gather(1, action.unsqueeze(1)).squeeze(1)
 
                 self.buffer.add_step(log_p, action)
@@ -192,12 +159,11 @@ class PPOTrainer:
             reward_sample = self.env.get_reward(state, actions_t)      # [B] negative
 
             # ── Pass 2: Greedy rollout (baseline) ──────────────────────
-            # Change 3: pass encoder ref so greedy also uses dynamic features
+            # Static psi_prime — no encoder arg needed
             state_greedy = self.env.reset(instance)
             _, _, tour_len_greedy = self.policy.decoder.rollout(
                 psi_prime, state_greedy, knn_indices, self.env,
                 greedy=True,
-                encoder=enc_ref,                                       # Change 3
             )
             reward_greedy = -tour_len_greedy                           # [B] negative
 
@@ -230,12 +196,10 @@ class PPOTrainer:
         CRITICAL: psi_prime DETACHED before critic head to stop value gradient
         from corrupting the shared encoder.
 
-        Change 3 note: feature_builder(init_instance) is called without
-        current_node_coords → feature[5] = dist(i, depot) fallback.
-        This is correct because evaluate_actions() in qap_policy.py
-        rebuilds per-step features internally with cur_coords_3d.
-        The psi_prime_mb passed here is used ONLY for the critic value
-        head (get_value), which uses the mean-pooled initial encoding.
+        Encoder is STATIC: feature_builder(init_instance) called once per
+        minibatch with no current_node_coords. evaluate_actions() in
+        qap_policy.py uses the resulting static psi_prime_mb, broadcast
+        across all T steps.
 
         Returns a comprehensive diagnostic dict with 16 fields:
             policy_loss, value_loss, entropy, grad_norm, clip_fraction,
@@ -261,9 +225,7 @@ class PPOTrainer:
                     k: v[idx] if isinstance(v, torch.Tensor) else v
                     for k, v in self._last_instance.items()
                 }
-                # Change 3: feature_builder returns [mb, N+1, 6] with fallback
-                # feature[5]=dist(i,depot). evaluate_actions() overrides this
-                # internally with per-step cur_coords_3d.
+                # Static encode: feature_builder returns [mb, N+1, 5]
                 features_mb  = self.policy.encoder.feature_builder(init_instance)
                 psi_prime_mb = self.policy.encoder.qap_encoder(features_mb)  # [mb,N+1,2]
                 knn_mb       = self._last_knn[idx]                            # [mb,N+1,k]
@@ -285,8 +247,6 @@ class PPOTrainer:
                            (ratio > 1 + self.clip_epsilon)).float().mean().item()
 
                 # ── Value loss — DETACHED (encoder protected) ──────────
-                # Critic uses initial psi_prime_mb — acceptable since critic
-                # mean-pools representations and does not need dynamic features
                 v_new  = self.policy.get_value(psi_prime_mb.detach())   # [mb]
                 v_loss = ((v_new - rets) ** 2).mean()
 
