@@ -15,10 +15,9 @@
 
 ---
 
-## 0. Methodology Changes (May 2026) — Changes 1+2 ACTIVE, Change 3 REVERTED
+## 0. Methodology Changes (May 2026) — Changes 1+2
 
 Two changes fix proximity-blindness in the decoder scoring.
-**Change 3 was attempted but reverted — it destabilized training.**
 
 ### Change 1 — Distance Proximity Penalty (§3.3.4)
 Score formula gains a third term:
@@ -38,21 +37,9 @@ ctx = [ψ'_curr(2), cap/C(1), t/N(1), x_curr(1), y_curr(1)]   W_q ∈ ℝ^{2×6}
 - Returns `(query [B,2], current_coords [B,2])` — always unpack both
 - +4 parameters
 
-### Change 3 — Dynamic Proximity Feature (§3.3.1) — REVERTED
-```
-ATTEMPTED: xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist(i, vₜ)]  ∈ ℝ⁶
-```
-- **REVERTED** — per-step re-encoding destabilized training catastrophically:
-  λ went negative (→ −1.6), μ exploded (→ 3.4), val_tour diverged to 13.7 (123% gap)
-  while greedy_tour was only 7.2. The amplitude space becomes inconsistent when
-  ψ' changes every step — kNN interference and context attention lose their
-  geometric meaning.
-- Changes 1+2 already provide spatial awareness in the decoder without corrupting
-  the encoder's static amplitude geometry.
-- Encoder remains STATIC: 5D features, computed once, psi_prime fixed for all steps.
-- Feature vector: `xᵢ = [d/C, dist_depot, x, y, angle/π]  ∈ ℝ⁵`
-
-**Total new params: +5. Full model: ~391 → ~396.**
+### Change 3 — Dynamic Proximity Feature (§3.3.1)
+Not implemented. The encoder is STATIC (5D features, computed once).
+Spatial awareness is provided by Changes 1+2 in the decoder.
 
 ---
 
@@ -140,7 +127,6 @@ xᵢ = [d_i/C,  dist(i,depot),  x_i,  y_i,  atan2(Δy,Δx)/π]
       [0]         [1]          [2]   [3]        [4]
 ```
 - All 5 features are STATIC — computed once before decoding
-- No dynamic features (Change 3 reverted)
 
 ### Amplitude Projection  (§3.X.4)
 ```
@@ -198,10 +184,10 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 
 | File | Change | Status |
 |------|--------|--------|
-| `encoder/feature_constructor.py` | Static 5D features | ✓ (Change 3 reverted) |
-| `encoder/amplitude_projection.py` | input_dim=5, W 2×5 | ✓ (Change 3 reverted) |
-| `encoder/rotation_mlp.py` | input_dim=5, 5→16→1 | ✓ (Change 3 reverted) |
-| `encoder/qap_encoder.py` | input_dim=5, static forward(state) | ✓ (Change 3 reverted) |
+| `encoder/feature_constructor.py` | Static 5D features | ✓ Done |
+| `encoder/amplitude_projection.py` | input_dim=5, W 2×5 | ✓ Done |
+| `encoder/rotation_mlp.py` | input_dim=5, 5→16→1 | ✓ Done |
+| `encoder/qap_encoder.py` | input_dim=5, static forward(state) | ✓ Done |
 | `decoder/context_query.py` | Change 2: ctx ℝ⁴→ℝ⁶, Wq 2×4→2×6 | ✓ Done |
 | `decoder/hybrid_scoring.py` | Change 1: +mu_param, −μ·dist | ✓ Done |
 | `decoder/qap_decoder.py` | C1+C2: current_coords to scoring, no encoder arg | ✓ Done |
@@ -219,7 +205,7 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 - `mask[:, 0] = False` — depot NEVER masked
 - Diagonal = `inf` before kNN topk (no self-loops)
 - `context_query.forward()` returns tuple — always unpack: `query, current_coords = ...`
-- `decoder.rollout()` uses fixed psi_prime — no encoder arg, no per-step re-encoding
+- `decoder.rollout()` uses fixed psi_prime — no per-step re-encoding
 - `evaluate_actions()` broadcasts static psi_prime across T steps
 - `evaluate_augmented()` uses coordinate augmentation + greedy (NOT stochastic) — evaluate.py v3
 - After `plot_route_map(best_route.png)`: run `solve_one_with_routes()` on same instance → `ortools_route.png`
@@ -228,10 +214,9 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 ### NEVER
 - Quantum libraries (PennyLane, Qiskit)
 - Mask after softmax
-- Revert feature_dim back to 6 (Change 3 is permanently reverted)
+- feature_dim set to 6
 - Revert context_dim back to 4 (Change 2 is permanent)
 - Remove μ parameter (Change 1 is permanent)
-- Re-introduce per-step re-encoding (Change 3 — proved catastrophic)
 - Run from parent directory (path bug)
 
 ---
@@ -242,13 +227,9 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 |---|---------|-----|
 | P15 | context_query returns tuple not tensor | Unpack: `query, current_coords = context_query(...)` |
 | P16 | mu_param missing or not nn.Parameter | `self.mu_param = nn.Parameter(torch.tensor(0.5))` |
-| P17 | Change 3 re-applied (dynamic encoder) | REVERTED — destabilized training. Encoder must be STATIC 5D |
-| P18 | Per-step re-encoding attempted | NEVER re-encode per step. psi_prime is fixed after initial encode |
+| P17 | feature_dim set to 6 | Must be 5. Encoder is static 5D |
+| P18 | Per-step re-encoding attempted | NEVER re-encode. psi_prime is fixed after initial encode |
 | P19 | evaluate_actions rebuilds psi_prime per step | Must BROADCAST static psi_prime — NOT rebuild |
-| P20 | feature_dim set to 6 | Must be 5. Change 3 reverted |
-| P21 | evaluate_augmented uses stochastic sampling | coord aug + greedy (evaluate.py v3) — works with static encoder |
-| P22 | val_tour > greedy_tour in log | Check evaluate.py — stochastic aug may be broken |
-| P23 | λ goes negative or μ > 2 during training | Likely Change 3 contamination. Verify encoder is static 5D |
 | P24 | Dense grey gridlines on twinx panels | `.set_zorder(-1)`, `.patch.set_visible(False)`, `.grid(False)` |
 
 ---
@@ -257,7 +238,7 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 
 ```python
 # Encoder (QAP mode)
-assert features.shape == (B, N+1, 5),     "features must be 5D (Change 3 reverted)"
+assert features.shape == (B, N+1, 5),     "features must be 5D"
 assert psi_prime.shape == (B, N+1, 2)
 norms = psi_prime.norm(dim=-1)
 assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), "unit norm"
@@ -271,7 +252,7 @@ assert hasattr(model.decoder.hybrid, 'mu_param'), "μ missing"
 assert dist_to_nodes.shape == (B, N+1)
 
 # Encoder is STATIC — no per-step re-encoding
-# evaluate_actions broadcasts psi_prime — does NOT rebuild per step
+# evaluate_actions broadcasts psi_prime
 
 # Masking
 assert mask[:, 0].sum() == 0,            "depot must never be masked"

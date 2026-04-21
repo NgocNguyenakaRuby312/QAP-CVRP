@@ -8,10 +8,6 @@ Combines: FeatureBuilder + AmplitudeProjection + RotationMLP + apply_rotation.
 
 The encoder is STATIC — called ONCE before the decoding loop.
 psi_prime is fixed for all decode steps. kNN is precomputed from spatial coords.
-
-Changes 1+2 are in the decoder only. The encoder is unchanged from the original design.
-Change 3 (dynamic per-step re-encoding) was attempted but reverted — it destabilized
-training (λ→−1.6, μ→3.4, val_tour→13.7 at 123% gap). See KNOWLEDGE_debugging.md P18.
 """
 
 import sys

@@ -24,10 +24,7 @@ Changes vs original:
         Wq ∈ ℝ^{2×6} (was 2×4)
         context_query.forward() returns (query, current_coords)
 
-    Change 3 REVERTED — dynamic per-step re-encoding destabilized training.
-    Encoder is STATIC: 5D features, computed once, psi_prime fixed for all steps.
-
-    evaluate_actions() (Changes 1+2 only):
+    evaluate_actions() (Changes 1+2):
         - psi_prime broadcast across T steps (static — NOT rebuilt per step)
         - ctx [mb, T, 6] with x_curr, y_curr (Change 2)
         - dist_to_nodes [mb, T, N+1] for μ·dist penalty (Change 1)
@@ -109,7 +106,7 @@ class QAPPolicy(nn.Module):
         self,
         instance:    dict,            # {coords, demands, capacity}
         actions:     torch.Tensor,    # [B, T]  stored actions
-        psi_prime:   torch.Tensor,    # [B, N+1, 2]  initial encode (Change 3: rebuilt per step)
+        psi_prime:   torch.Tensor,    # [B, N+1, 2]  static encoder output
         knn_indices: torch.Tensor,    # [B, N+1, k]  precomputed on spatial coords
     ):
         """
@@ -121,7 +118,6 @@ class QAPPolicy(nn.Module):
             Change 2: ctx [mb,T,6] includes x_curr,y_curr
             Change 1: dist_to_nodes [mb,T,N+1] for mu dist penalty
             psi_prime is STATIC: broadcast across T steps, NOT rebuilt per step
-            (Change 3 reverted)
 
         Returns:
             lp_new:  [B, T]   log-prob of each taken action
@@ -202,12 +198,9 @@ class QAPPolicy(nn.Module):
         query = self.decoder.context_query.Wq(ctx)                     # [mb, T, 2]
 
         # ── Term 1: Context scores q[b,t] · ψ'[b,t,j] → [mb, T, N+1]
-        # Change 3: psi_prime_3d is per-step, not broadcast
         context_scores = torch.einsum('btd,btnd->btn', query, psi_prime_3d)  # [mb,T,N+1]
 
-        # ── Term 2: Interference — computed per step from psi_prime_3d
-        # For each step t, E_kNN uses that step's psi_prime_3d[:,t,:,:]
-        # Stack per-step interference into [mb, T, N+1]
+        # ── Term 2: Interference — kNN from static psi_prime_3d
         interf_list = []
         for t_idx in range(T):
             psi_t   = psi_prime_3d[:, t_idx, :, :]                    # [mb, N+1, 2]

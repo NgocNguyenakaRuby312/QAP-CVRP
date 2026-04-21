@@ -8,8 +8,7 @@
 
 ## 0. Methodology Changes Applied (May 2026)
 
-All **two** changes are permanently part of the codebase. Change 3 was reverted.
-Total new params from Changes 1+2: +5.
+All **two** changes are permanently part of the codebase. Total new params: +5.
 
 ### Change 1 — Distance Proximity Penalty (§3.3.4)
 - File: `decoder/hybrid_scoring.py`
@@ -25,11 +24,8 @@ Total new params from Changes 1+2: +5.
 - `forward()` returns `(query [B,2], current_coords [B,2])` — always unpack both
 - +4 parameters
 
-### Change 3 — Dynamic Proximity Feature (§3.3.1) — REVERTED
-- **Attempted** but reverted: per-step re-encoding destabilized training
-- λ → −1.6, μ → 3.4, val_tour → 13.7 (123% gap) over 22 epochs
-- Encoder remains STATIC: 5D features, computed once, psi_prime fixed
-- Files reverted: all 4 encoder files back to input_dim=5
+### Change 3 — Dynamic Proximity Feature (§3.3.1)
+Not implemented. Encoder is STATIC: 5D features, computed once.
 
 **Other files affected by Changes 1+2:**
 - `decoder/qap_decoder.py` — passes `current_coords` and `state["coords"]` to scoring
@@ -54,11 +50,11 @@ THESIS CODE QAP_VRP/
 │   ├── train_ablation_n20.py        ← Ablation study: QAP-DRL vs Pure DRL
 │   ├── encoder/
 │   │   ├── __init__.py
-│   │   ├── feature_constructor.py   ← Static 5D features (Change 3 REVERTED)
-│   │   ├── amplitude_projection.py  ← input_dim=5, W 2×5 (Change 3 REVERTED)
-│   │   ├── rotation_mlp.py          ← input_dim=5, 5→16→1 (Change 3 REVERTED)
+│   │   ├── feature_constructor.py   ← Static 5D features
+│   │   ├── amplitude_projection.py  ← input_dim=5, W 2×5
+│   │   ├── rotation_mlp.py          ← input_dim=5, 5→16→1
 │   │   ├── rotation.py              ← UNCHANGED
-│   │   ├── qap_encoder.py           ← input_dim=5, static forward(state) (Change 3 REVERTED)
+│   │   ├── qap_encoder.py           ← input_dim=5, static forward(state)
 │   │   └── baseline_encoder.py      ← Ablation: plain MLP, no norm/rotation
 │   ├── decoder/
 │   │   ├── __init__.py
@@ -202,18 +198,13 @@ Phase 3 (longer):  400 epochs, CosineAnnealingWarmRestarts   (after Phase 2)
 
 **Recent additions (this session):**
 
-### `training/evaluate.py` — v3 (Change 3 compatibility fix)
+### `training/evaluate.py` — v3
 ```
-PROBLEM: stochastic augmentation invalid with dynamic encoder (Change 3).
-  Original ran 8 stochastic samples × same instance → torch.minimum.
-  With Change 3: each sample has different v_t → different psi_prime per step
-  → 8 incomparable embedding spaces. val_tour was 0.79 WORSE than greedy_tour.
 FIX: coordinate augmentation + greedy decoding.
   8 geometric transforms (rot×4 + reflect×4) applied to instance coords.
   GREEDY decoding on each (deterministic → consistent v_t sequence).
   Tour length computed on ORIGINAL coords (distance-invariant).
   torch.minimum across 8 greedy runs → valid diversity.
-RULE: stochastic aug = static encoder only. coord aug + greedy = always valid.
 ```
 
 ### `utils/ortools_solver.py` — v3 (+solve_one_with_routes)
@@ -252,7 +243,7 @@ Fixes dense grey gridlines in dual-axis panels.
 4. Feasibility mask applied BEFORE softmax (set to -1e9)
 5. `context_query.forward()` returns a 2-tuple — always unpack
 6. `psi_prime` DETACHED before critic head in ppo_agent.update()
-7. Feature order: `[d/C, dist_depot, x, y, angle/π]` — 5D (Change 3 reverted)
+7. Feature order: `[d/C, dist_depot, x, y, angle/π]` — 5D
 8. Angle feature normalized by π → range [-1, 1]
 9. At depot: ψ'_curr = [0, 0] but x_curr = depot_x, y_curr = depot_y (actual coords)
 10. `mu_param` must be `nn.Parameter`, not a plain float

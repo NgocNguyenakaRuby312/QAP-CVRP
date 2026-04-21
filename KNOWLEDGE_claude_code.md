@@ -27,9 +27,9 @@ Reinforcement Learning for Clustered Vehicle Routing Problems" (IU HCMC, 2025).
 
 ---
 
-## Methodology Changes Applied (May 2026) — Changes 1+2 ACTIVE, Change 3 REVERTED
+## Methodology Changes Applied (May 2026) — Changes 1+2
 
-Changes 1+2 are permanent canonical. Change 3 was reverted.
+Changes 1+2 are permanent canonical.
 
 ### Change 1 — Distance Proximity Penalty (hybrid_scoring.py)
 ```
@@ -48,16 +48,8 @@ query = Wq · ctx,   Wq ∈ ℝ^{2×6}
 - `forward()` returns `(query [B,2], current_coords [B,2])` — **always unpack both**
 - +4 parameters
 
-### Change 3 — Dynamic Proximity Feature — REVERTED
-```
-ATTEMPTED: xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist(i, vₜ)]  ∈ ℝ⁶
-REVERTED: per-step re-encoding destabilized training catastrophically.
-  λ → −1.6, μ → 3.4, val_tour → 13.7 (123% gap) in 22 epochs.
-```
-- Encoder is STATIC: 5D features, computed once, psi_prime fixed for all steps
-- `FeatureBuilder.forward(state)` — single argument, returns `[B, N+1, 5]`
-- No per-step re-encoding. No encoder arg in `decoder.rollout()`
-- Changes 1+2 already provide spatial awareness in the decoder
+### Change 3 — Dynamic Proximity Feature
+Not implemented. Encoder is STATIC: 5D features, computed once.
 
 **Net: +5 params from Changes 1+2. Full model: ~391 → ~396.**
 
@@ -121,16 +113,16 @@ ORTOOLS_EVAL_SIZE = 1_000  # OR-Tools subset (speed)
 
 | File | Changes | Status |
 |------|---------|--------|
-| `encoder/feature_constructor.py` | Static 5D (Change 3 reverted) | ✓ |
-| `encoder/amplitude_projection.py` | input_dim=5 (Change 3 reverted) | ✓ |
-| `encoder/rotation_mlp.py` | input_dim=5 (Change 3 reverted) | ✓ |
-| `encoder/qap_encoder.py` | input_dim=5, static (Change 3 reverted) | ✓ |
+| `encoder/feature_constructor.py` | Static 5D | ✓ |
+| `encoder/amplitude_projection.py` | input_dim=5 | ✓ |
+| `encoder/rotation_mlp.py` | input_dim=5 | ✓ |
+| `encoder/qap_encoder.py` | input_dim=5, static | ✓ |
 | `decoder/context_query.py` | Change 2: ctx ℝ⁴→ℝ⁶ | ✓ |
 | `decoder/hybrid_scoring.py` | Change 1: mu_param, −μ·dist | ✓ |
 | `decoder/qap_decoder.py` | C1+C2: current_coords to scoring (no encoder arg) | ✓ |
 | `models/qap_policy.py` | C1+C2: feature_dim=5, broadcast psi_prime | ✓ |
 | `training/ppo_agent.py` | C1: mu_val logged | ✓ |
-| `training/evaluate.py` | v3: coord-aug+greedy (Change 3 fix) | ✓ |
+| `training/evaluate.py` | v3: coord-aug+greedy | ✓ |
 | `utils/ortools_solver.py` | v3: +solve_one_with_routes() | ✓ |
 | `train_n20.py` | All: mu_val logged, chart updated, ortools_route.png | ✓ |
 | `train_n50.py` | OR-Tools route map, twinx gridline fix | ✓ |
@@ -148,7 +140,7 @@ ORTOOLS_EVAL_SIZE = 1_000  # OR-Tools subset (speed)
 7. Shared encoder between actor and critic
 8. psi_prime DETACHED before critic head
 9. demands depot = 0
-10. Feature order: [d/C, dist_depot, x, y, angle/π]  (5D — Change 3 reverted)
+10. Feature order: [d/C, dist_depot, x, y, angle/π]  (5D)
 11. Angle normalized by π (range [-1, 1])
 12. ψ'_curr = zero vector at depot; x_curr,y_curr = actual depot coords (NOT zero)
 13. `context_query.forward()` returns TUPLE — always unpack: `query, current_coords = ...`
@@ -161,7 +153,7 @@ ORTOOLS_EVAL_SIZE = 1_000  # OR-Tools subset (speed)
 ## Validation Checks
 
 After any code change, verify:
-- [ ] `features.shape[-1] == 5` — 5D features (Change 3 reverted)
+- [ ] `features.shape[-1] == 5` — 5D features
 - [ ] ψ' vectors: L2 norm = 1.0 (atol=1e-5) — QAP mode only
 - [ ] All tours feasible, all N customers visited exactly once
 - [ ] `context.shape[-1] == 6` — 6D context after Change 2
@@ -188,11 +180,7 @@ After any code change, verify:
 | P14 | OOM RTX 3050 | batch_size=256; empty_cache() |
 | P15 | context_query returns tuple | `query, current_coords = context_query(...)` |
 | P16 | mu_param missing | `nn.Parameter(torch.tensor(0.5))` |
-| P17 | Change 3 re-applied (dynamic 6D encoder) | REVERTED. Encoder must be STATIC 5D |
-| P18 | Per-step re-encoding attempted | NEVER re-encode. psi_prime fixed after initial encode |
-| P19 | evaluate_actions rebuilds psi_prime per step | Must BROADCAST static psi_prime |
-| P20 | feature_dim set to 6 | Must be 5. Change 3 reverted |
-| P21 | evaluate_augmented uses stochastic sampling | coord aug + greedy (evaluate.py v3) |
-| P22 | val_tour > greedy_tour in log | Check evaluate.py — stochastic aug broken |
-| P23 | λ goes negative or μ > 2 | Likely Change 3 contamination. Verify encoder is static 5D |
+| P17 | feature_dim set to 6 | Must be 5. Encoder is static 5D |
+| P18 | Per-step re-encoding attempted | NEVER re-encode. psi_prime is fixed after initial encode |
+| P19 | evaluate_actions rebuilds psi_prime per step | Must BROADCAST static psi_prime — NOT rebuild |
 | P24 | Dense grey gridlines on twinx panels | `.set_zorder(-1)`, `.patch.set_visible(False)`, `.grid(False)` |

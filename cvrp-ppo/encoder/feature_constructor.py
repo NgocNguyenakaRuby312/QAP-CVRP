@@ -15,12 +15,6 @@ Feature [4]: polar angle relative to depot, divided by π → ∈ [−1, 1]
 
 These are STATIC features — computed ONCE before the decoding loop.
 The encoder produces a fixed graph embedding that does NOT change during decoding.
-
-Change 3 was attempted (dynamic 6th feature dist(i,vₜ)) but REVERTED because
-per-step re-encoding destabilized training: λ went negative, μ exploded to 3.4,
-val_tour diverged to 13.7 (123% gap) while greedy_tour was only 7.2.
-The decoder's context query (Change 2: x_curr, y_curr) and distance penalty
-(Change 1: −μ·dist) already provide spatial awareness without corrupting the encoder.
 """
 
 import math

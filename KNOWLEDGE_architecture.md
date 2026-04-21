@@ -11,15 +11,14 @@
 
 ## 0. Methodology Changes Applied (May 2026)
 
-Three changes fix proximity-blindness across encoder, context, and scoring.
-All three are implemented and canonical. Total new parameters: +23.
+Two changes fix proximity-blindness in decoder scoring.
+Changes 1+2 are implemented and canonical. Total new parameters: +5.
 
 ### Change 1 — Distance Proximity Penalty (§3.3.4 Scoring)
 
 **Problem diagnosed:** The two existing scoring terms (attention + interference) are both
 amplitude-space signals on S¹. Neither measures Euclidean distance from the vehicle's current
-position to each candidate node. This caused suboptimal first-leg selection (e.g. choosing
-C1 at dist=0.391 over C5 at dist=0.094 despite C5 being 4× closer to the depot).
+position to each candidate node.
 
 **Formula change:**
 ```
@@ -33,8 +32,7 @@ After:   Score(j) = q · ψ'ⱼ  +  λ · E_kNN(j)  −  μ · dist(vₜ, vⱼ)
 ### Change 2 — Spatial Context Grounding (§3.3.3 Context)
 
 **Problem diagnosed:** At t=0, ψ'_curr = [0,0] so the query direction is determined only
-by the capacity column of Wq — pointing arbitrarily (≈121° in the demo), unrelated to
-node proximity.
+by the capacity column of Wq — pointing arbitrarily, unrelated to node proximity.
 
 **Formula change:**
 ```
@@ -48,28 +46,10 @@ After:   ctx = [ψ'_curr(2), cap/C(1), t/N(1), x_curr(1), y_curr(1)]  ∈ ℝ⁶
 - `forward()` now returns `(query [B,2], current_coords [B,2])` — **always unpack both**
 - **+4 parameters**
 
-### Change 3 — Dynamic Proximity Feature (§3.3.1 Feature Construction)
+### Change 3 — Dynamic Proximity Feature (§3.3.1)
+Not implemented. Encoder is STATIC: 5D features, computed once.
 
-**Problem diagnosed:** All five features were static — computed once before decoding.
-Feature [1] encoded dist(i, depot) but never dist(i, current_vehicle). The amplitude
-projection W and rotation MLP θᵢ had no signal about the vehicle's current position,
-so they could not learn proximity-aware amplitude encodings.
-
-**Formula change:**
-```
-Before:  xᵢ = [dᵢ/C, dist(i,depot), xᵢ, yᵢ, angle/π]           ∈ ℝ⁵
-After:   xᵢ(t) = [dᵢ/C, dist(i,depot), xᵢ, yᵢ, angle/π, dist(i,vₜ)]  ∈ ℝ⁶
-```
-- `dist(i, vₜ)` = ‖(xᵢ,yᵢ) − (x_{vₜ},y_{vₜ})‖₂  — recomputed at each decoding step t
-- This is a **dynamic feature**: changes as the vehicle moves, unlike features [0]–[4]
-- At initial encode (before decoding loop): falls back to dist(i, depot) = feature[1]
-- Files: `encoder/feature_constructor.py`, `encoder/amplitude_projection.py`, `encoder/rotation_mlp.py`, `encoder/qap_encoder.py`
-- AmplitudeProjection: input_dim 5→6, W: ℝ^{2×5}→ℝ^{2×6} **+2 params**
-- RotationMLP: input_dim 5→6, first layer 5×16→6×16 **+16 params**
-- **Total: +18 parameters**
-- Complexity: encoder called O(N) per step → O(N²) total (negligible for N≤100)
-
-**Total across all 3 changes: +23 parameters. Full model: ~391 → ~414.**
+**Total across Changes 1+2: +5 parameters. Full model: ~391 → ~396.**
 
 ---
 
@@ -114,17 +94,15 @@ demands = torch.randint(1, 10, (N,))
 Input: coords [B, N+1, 2], demands [B, N+1], capacity C
     │
     ▼
-┌─────────────────────── ENCODER ───────────────────────────────────────┐
-│  ① Feature Construction    → [B, N+1, 6]  ← Change 3: was 5D         │
-│     xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist_curr]              │
-│  ② Amplitude Projection    Linear(6→2) + L2 norm → [B, N+1, 2]       │
-│     W ∈ ℝ^{2×6}  ← Change 3: was 2×5                                 │
-│  ③ Rotation MLP            MLP(6→16→1) → θ_i → [B, N+1]              │
-│     first layer 6×16  ← Change 3: was 5×16                            │
-│  ④ Rotation Matrix         R(θ_i) · ψ_i → ψ'_i → [B, N+1, 2]        │
-│  NOTE: encoder re-called each decode step (Change 3)                  │
-└───────────────────────────────────────────────────────────────────────┘
-    │ ψ'_i (unit circle embeddings, updated each step)
+┌─────────────────────── ENCODER (STATIC — runs once) ──────────────────────────┐
+│  ① Feature Construction    → [B, N+1, 5]                                     │
+│     xᵢ = [d/C, dist_depot, x, y, angle/π]                                    │
+│  ② Amplitude Projection    Linear(5→2) + L2 norm → [B, N+1, 2]               │
+│     W ∈ ℝ^{2×5}                                                               │
+│  ③ Rotation MLP            MLP(5→16→1) → θ_i → [B, N+1]                     │
+│  ④ Rotation Matrix         R(θ_i) · ψ_i → ψ'_i → [B, N+1, 2]               │
+│  NOTE: encoder called ONCE. psi_prime fixed for all decode steps.             │
+└───────────────────────────────────────────────────────────────────────────────┘
     ▼
 ┌─────────────────────── DECODER (autoregressive) ──────────────────────┐
 │  For each step t = 0, 1, ..., N-1:                                     │
@@ -144,7 +122,7 @@ Input: coords [B, N+1, 2], demands [B, N+1], capacity C
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### Parameter Budget (Changes 1+2 — Change 3 reverted)
+### Parameter Budget (Changes 1+2)
 
 | Component | Specification | Parameters |
 |-----------|--------------|------------|
@@ -162,7 +140,7 @@ Input: coords [B, N+1, 2], demands [B, N+1], capacity C
 
 | Component | Specification | Parameters |
 |-----------|--------------|------------|
-| BaselineEncoder | Linear(5→2) + ReLU — static features only, no Change 3 | 12 |
+| BaselineEncoder | Linear(5→2) + ReLU — static features only | 12 |
 | W_q (6), λ, μ, Critic | same as full model | 271 |
 | **Baseline total** | | **~283** |
 
@@ -170,42 +148,36 @@ Input: coords [B, N+1, 2], demands [B, N+1], capacity C
 
 ## 3. Encoder Components
 
-### 3.1 Feature Construction (§3.X.3) — Change 3
+### 3.1 Feature Construction (§3.X.3)
 
 ```
-xᵢ(t) = [dᵢ/C, dist(i,depot), xᵢ, yᵢ, atan2(Δy,Δx)/π, dist(i, vₜ)]  ∈ ℝ⁶
-          [0]       [1]          [2]  [3]      [4]              [5]
+xᵢ = [dᵢ/C, dist(i,depot), xᵢ, yᵢ, atan2(Δy,Δx)/π]  ∈ ℝ⁵
+      [0]       [1]          [2]  [3]      [4]
 ```
 
-Feature [5] is **dynamic** — recomputed at each decoding step t.
-Fallback (initial encode before loop): feature[5] = feature[1] (dist to depot).
+All 5 features are STATIC — computed once before the decoding loop.
 
-`FeatureBuilder.forward(state, current_node_coords=None)` — when `current_node_coords [B,2]`
-is provided, feature[5] = ‖coords_j − current_node_coords‖₂. Otherwise falls back.
+`FeatureBuilder.forward(state)` — single argument, returns `[B, N+1, 5]`.
 
-### 3.2 Amplitude Projection (§3.X.4) — Change 3
+### 3.2 Amplitude Projection (§3.X.4)
 
 ```
-ψ_i = Normalize(W_proj · xᵢ(t) + b_proj),   W ∈ ℝ^{2×6},  α²+β²=1
+ψ_i = Normalize(W_proj · xᵢ + b_proj),   W ∈ ℝ^{2×5},  α²+β²=1
 ```
 
-### 3.3 Rotation MLP (§3.X.5) — Change 3
+### 3.3 Rotation MLP (§3.X.5)
 
 ```
-θ_i = MLP(xᵢ(t))   MLP: ℝ^6 → ℝ^16 → ℝ^1, tanh
+θ_i = MLP(xᵢ)   MLP: ℝ^5 → ℝ^16 → ℝ^1, tanh
 ψ'_i = R(θ_i) · ψ_i     (norm preserved)
 ```
 
 ### 3.4 FullEncoder interface
 
 ```python
-# One-shot encode (initial, before decoding loop):
+# Static encode — called once before decoding loop:
 psi_prime, features, knn_indices = encoder.forward(state)
-# psi_prime: [B, N+1, 2], features: [B, N+1, 6], knn_indices: [B, N+1, k]
-
-# Per-step encode (inside decoding loop — Change 3):
-features  = encoder.build_features(state, current_node_coords)  # [B, N+1, 6]
-psi_step  = encoder.qap_encoder(features)                       # [B, N+1, 2]
+# psi_prime: [B, N+1, 2], features: [B, N+1, 5], knn_indices: [B, N+1, k]
 ```
 
 ---
@@ -233,13 +205,11 @@ Score(j) = q_t · ψ'_j  +  λ · E_kNN(j)  −  μ · dist(vₜ, vⱼ)
 
 `HybridScoring.forward(query, psi_prime, knn_indices, mask, current_coords, all_coords)`
 
-### 4.3 Decoder rollout — Change 3
+### 4.3 Decoder rollout
 
 ```python
-# Pass encoder to rollout() to enable per-step re-encoding:
 actions, log_probs, tour_len = decoder.rollout(
-    psi_prime, env_state, knn_indices, env,
-    greedy=False, encoder=encoder          # encoder=None → no re-encoding (backward compat)
+    psi_prime, env_state, knn_indices, env, greedy=False
 )
 ```
 
@@ -272,11 +242,9 @@ actions, log_probs, tour_len = decoder.rollout(
 | VAL_EVAL_SIZE | 10,000 | key paper standard |
 | ORTOOLS_EVAL_SIZE | 1,000 | OR-Tools subset (speed) |
 
-### evaluate_augmented() Compatibility Rule
-Stochastic augmentation (sample N times, take minimum) is ONLY valid when the encoder is static.
-With Change 3 (dynamic encoder, per-step re-encoding), stochastic augmentation is INVALID.
-Fix: **coordinate augmentation + greedy decoding** (evaluate.py v3).
-8 isometric transforms of unit square × greedy decoding. Distances preserved.
+### evaluate_augmented() Rule
+Coordinate augmentation + greedy decoding (evaluate.py v3).
+8 isometric transforms of unit square × greedy decoding.
 
 ### OR-Tools Route Visualization
 Post-training: `solve_one_with_routes()` runs OR-Tools on the SAME instance (`best_i`)
@@ -285,12 +253,12 @@ style for direct visual comparison of model vs optimal routes.
 
 ---
 
-## 7. Canonical Math (all 3 changes)
+## 7. Canonical Math (Changes 1+2)
 
 ```
-xᵢ(t) = [d_i/C, ‖i-depot‖, x_i, y_i, atan2/π, ‖i-vₜ‖]  ∈ ℝ⁶   ← Change 3
-ψ_i    = normalize(W·xᵢ(t)+b),  W ∈ ℝ^{2×6},  ‖ψ‖=1            ← Change 3
-θ_i    = MLP(xᵢ(t)),  MLP: 6→16→1, tanh                          ← Change 3
+xᵢ    = [d_i/C, ‖i-depot‖, x_i, y_i, atan2/π]  ∈ ℝ⁵   (STATIC)
+ψ_i    = normalize(W·xᵢ+b),  W ∈ ℝ^{2×5},  ‖ψ‖=1
+θ_i    = MLP(xᵢ),  MLP: 5→16→1, tanh
 ψ'_i   = R(θ_i)·ψ_i,  ‖ψ'‖=1
 ctx_t  = [ψ'_curr, cap_t/C, t/N, x_curr, y_curr]  ∈ ℝ⁶            ← Change 2
 q_t    = W_q·ctx_t,   W_q ∈ ℝ^{2×6}                               ← Change 2
@@ -300,15 +268,14 @@ L        = L_clip + c1·L_value + c2·L_entropy
 
 ---
 
-## 8. Glossary (all 3 changes)
+## 8. Glossary (Changes 1+2)
 
 | Thesis | Code | Shape |
-|--------|------|-------|
-| `xᵢ(t)` | `features` | `[B,N+1,6]` ← was 5 |
-| `dist(i,vₜ)` | `features[:,:,5]` | `[B,N+1]` ← new Change 3 |
+|--------|------|---------|
+| `xᵢ` | `features` | `[B,N+1,5]` |
 | `ψ_i` | `psi` | `[B,N+1,2]` |
 | `θ_i` | `theta` | `[B,N+1]` |
-| `ψ'_i` | `psi_prime` | `[B,N+1,2]` |
+| `ψ'_i` | `psi_prime` | `[B,N+1,2]` (STATIC) |
 | `ctx_t` | `ctx` | `[B,6]` ← was 4 |
 | `q_t` | `query` | `[B,2]` |
 | `Score(j)` | `scores` | `[B,N+1]` |

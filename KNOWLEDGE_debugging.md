@@ -110,7 +110,7 @@ evaluate_actions() PPO update path
 
 ### P11: Feature Order Mismatch
 **Symptom:** Model trains but performs poorly; amplitude projection learns wrong feature mapping.
-**Fix:** Verify feature order: `[d/C, dist_depot, x, y, angle/pi]` (5D, Change 3 reverted).
+**Fix:** Verify feature order: `[d/C, dist_depot, x, y, angle/pi]` (5D).
 
 ### P12: Angle Not Normalized by pi
 **Symptom:** Feature index [4] has range [-pi, pi] instead of [-1, 1]; dominates other features.
@@ -243,32 +243,12 @@ python train_n20.py
 
 ## 6. Evaluation Bugs (Fixed)
 
-### P18: evaluate_augmented() invalid with Change 3 (dynamic encoder)
-
-**Symptom:** `val_tour(aug×8)` is 0.7–0.9 WORSE than `greedy_tour` — impossible under correct augmentation. Reported gap is ~12% higher than actual model quality. In the log: `greedy=7.64` but `val_aug=8.43` at ep200.
-
-**Root cause:** Original `evaluate_augmented()` ran 8 stochastic samples of the same instance and took `torch.minimum`. This is valid when the encoder is static (psi_prime fixed for all steps). With Change 3, the encoder re-runs at every decode step using `dist(i, vₜ)` as feature[5]. Each stochastic sample takes different actions → different `vₜ` → different `psi_prime` at every step. The 8 samples explore 8 different embedding spaces — `torch.minimum` across them is meaningless.
-
-**Fix (evaluate.py v3):** Use **coordinate augmentation + greedy decoding** instead of stochastic sampling:
-- 8 geometric transforms (rotations + reflections) applied to instance coordinates
-- GREEDY decoding on each transformed instance (deterministic → consistent `vₜ` sequence)
-- Tour length computed on original coords (distance-invariant under isometric transforms)
-- `torch.minimum` across 8 greedy runs → valid diversity from geometric symmetry
-
-**Rule:** Stochastic augmentation is only valid when the encoder is static. Coordinate augmentation + greedy is valid regardless of whether the encoder is static or dynamic.
-
-### P19: val_tour > greedy_tour in train log = augmentation bug (NOT overfitting)
-**Symptom:** val_tour(aug×8) worse than greedy_tour at every epoch after ep5.
-**Root cause:** stochastic augmentation with dynamic encoder (Change 3). See P18.
+### P18: val_tour > greedy_tour = augmentation bug
+**Symptom:** val_tour(aug×8) worse than greedy_tour.
+**Root cause:** stochastic augmentation with a static encoder is still valid, but if stochastic sampling was accidentally used instead of coordinate augmentation + greedy, val_tour will be inflated.
 **Fix:** evaluate.py v3 (coordinate augmentation + greedy). After fix, val_tour should be ≤ greedy_tour.
-**Do NOT diagnose this as overfitting** — check evaluate.py first.
 
-### P20: Reported gap inflated by broken augmentation
-**Symptom:** gap vs OR-Tools appears ~12% higher than expected (~36% instead of ~24%).
-**Root cause:** val_tour computed by broken evaluate_augmented() — real model quality shown by greedy_tour.
-**Fix:** evaluate.py v3. After fix, gap should be based on coordinate-augmented greedy.
-
-### P21: Dense grey gridlines on twinx() chart panels
+### P19: Dense grey gridlines on twinx() chart panels
 See Section 4 above for fix.
 
 ### Symptom (Path error)
@@ -286,7 +266,7 @@ assert features.shape == (B, N+1, 5)
 assert psi_prime.shape == (B, N+1, 2)
 assert features[0, 0, 0].item() == 0.0, "depot demand ratio should be 0"
 assert features[:, :, 4].abs().max() <= 1.0, "angle feature should be in [-1, 1]"
-assert features.shape[-1] == 5, "must be 5D (Change 3 reverted)"
+assert features.shape[-1] == 5, "must be 5D"
 ```
 
 ### Decoder Checks (with Changes 1+2)
@@ -333,7 +313,7 @@ assert 0.001 < clip_frac < 0.30, f"Clip fraction {clip_frac:.3f} outside healthy
 When encountering an error:
 
 1. **Identify the component:** encoder / decoder / environment / PPO / data / device / chart
-2. **Check P1-P21** — P13/P14 for CUDA, P15 for tuple unpack, P16 for mu_param, P18-P20 for aug bug, P21 for gridlines
+2. **Check P1-P16** — P13/P14 for CUDA, P15 for tuple unpack, P16 for mu_param
 3. **Verify shapes** against Section 1 cheat sheet (context must be [B,6] not [B,4])
 4. **Check clip_fraction** in train_log.jsonl — near-zero means advantage collapse
 5. **Minimal reproduction:** Reduce to B=2, N=5 and step through manually

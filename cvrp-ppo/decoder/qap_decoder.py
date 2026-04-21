@@ -9,12 +9,6 @@ Change 1 + Change 2 (May 2026):
     - context_query now returns (query, current_coords)
     - hybrid scoring now receives current_coords and all_coords
     - context_dim defaults to 6 (was 4)
-
-Change 3 REVERTED:
-    Dynamic per-step re-encoding was attempted but reverted.
-    Caused catastrophic training failure: lambda went negative, mu exploded,
-    val_tour diverged to 123% gap. Encoder is STATIC: psi_prime fixed.
-    rollout() has no encoder argument. No per-step re-encoding.
 """
 
 import torch
@@ -48,7 +42,7 @@ class QAPDecoder(nn.Module):
     def forward(
         self,
         state:       dict,
-        psi_prime:   torch.Tensor,    # [B, N+1, 2]  — may be re-encoded each step
+        psi_prime:   torch.Tensor,    # [B, N+1, 2]  static, fixed for all steps
         knn_indices: torch.Tensor,
         step:        int,
         n_customers: int,
@@ -88,7 +82,7 @@ class QAPDecoder(nn.Module):
         Autoregressive loop until all customers visited.
 
         psi_prime is STATIC — computed once before calling rollout().
-        No per-step re-encoding (Change 3 reverted).
+        No per-step re-encoding.
 
         Args:
             psi_prime:   [B, N+1, 2]  encoder output (fixed)
