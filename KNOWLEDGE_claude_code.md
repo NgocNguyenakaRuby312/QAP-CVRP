@@ -27,9 +27,9 @@ Reinforcement Learning for Clustered Vehicle Routing Problems" (IU HCMC, 2025).
 
 ---
 
-## Methodology Changes Applied (May 2026) — ALL THREE
+## Methodology Changes Applied (May 2026) — Changes 1+2 ACTIVE, Change 3 REVERTED
 
-All three changes are permanent canonical. All implemented in code.
+Changes 1+2 are permanent canonical. Change 3 was reverted.
 
 ### Change 1 — Distance Proximity Penalty (hybrid_scoring.py)
 ```
@@ -48,31 +48,28 @@ query = Wq · ctx,   Wq ∈ ℝ^{2×6}
 - `forward()` returns `(query [B,2], current_coords [B,2])` — **always unpack both**
 - +4 parameters
 
-### Change 3 — Dynamic Proximity Feature (feature_constructor.py + encoder chain)
+### Change 3 — Dynamic Proximity Feature — REVERTED
 ```
-xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist(i, vₜ)]  ∈ ℝ⁶
+ATTEMPTED: xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist(i, vₜ)]  ∈ ℝ⁶
+REVERTED: per-step re-encoding destabilized training catastrophically.
+  λ → −1.6, μ → 3.4, val_tour → 13.7 (123% gap) in 22 epochs.
 ```
-- 6th feature `dist(i, vₜ)` is dynamic — recomputed each decode step
-- `FeatureBuilder.forward(state, current_node_coords=None)` — pass `[B,2]` for live distance
-- When `current_node_coords=None`: feature[5] = dist(i, depot) (fallback)
-- AmplitudeProjection: `input_dim=6` (was 5), W: 2×6 (+2 params)
-- RotationMLP: `input_dim=6` (was 5), first layer 6×16 (+16 params)
-- QAPEncoder and FullEncoder: `input_dim=6`
-- Decoder rollout: `decoder.rollout(..., encoder=enc_ref)` — re-encodes per step
-- evaluate_actions(): builds `psi_prime_3d [mb,T,N+1,2]` per step, not broadcast
-- +18 parameters
+- Encoder is STATIC: 5D features, computed once, psi_prime fixed for all steps
+- `FeatureBuilder.forward(state)` — single argument, returns `[B, N+1, 5]`
+- No per-step re-encoding. No encoder arg in `decoder.rollout()`
+- Changes 1+2 already provide spatial awareness in the decoder
 
-**Net: +23 params. Full model: ~391 → ~414.**
+**Net: +5 params from Changes 1+2. Full model: ~391 → ~396.**
 
 ---
 
 ## Architecture Summary
 
 ```
-6D Features [d/C, dist_depot, x, y, angle/π, dist_curr]   ← Change 3
-    → Linear(6→2) + L2Norm → ψ on unit circle               (QAP mode)
-    → Rotation(MLP(6→16→1, tanh)→θ→R(θ)·ψ) → ψ'            (QAP mode)
-    → re-encoded EACH step with current vehicle coords       ← Change 3
+5D Features [d/C, dist_depot, x, y, angle/π]   (STATIC — computed once)
+    → Linear(5→2) + L2Norm → ψ on unit circle               (QAP mode)
+    → Rotation(MLP(5→16→1, tanh)→θ→R(θ)·ψ) → ψ'            (QAP mode)
+    → psi_prime FIXED for all decode steps
     → Context: [ψ'_curr, cap/C, t/N, x_curr, y_curr] → Wq(6→2) → query  ← Change 2
     → Scoring: q·ψ'_j + λ·E_kNN(j) − μ·dist(vₜ,vⱼ) → softmax → action  ← Change 1
     → PPO training (ε=0.2, K=3, γ=0.99, GAE λ=0.95)
@@ -80,15 +77,15 @@ xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist(i, vₜ)]  ∈ ℝ⁶
 
 ### Encoder (2 variants)
 **QAP mode (`encoder_type="qap"`, default):**
-1. **FeatureConstructor:** `[d/C, dist_depot, x, y, angle/π, dist_curr]` → [B, N+1, 6]
-2. **AmplitudeProjection:** `Linear(6→2) + F.normalize` → [B, N+1, 2] (unit norm!)
-3. **RotationMLP:** `MLP(6→16→1, tanh)` → θ_i → [B, N+1]
+1. **FeatureConstructor:** `[d/C, dist_depot, x, y, angle/π]` → [B, N+1, 5]
+2. **AmplitudeProjection:** `Linear(5→2) + F.normalize` → [B, N+1, 2] (unit norm!)
+3. **RotationMLP:** `MLP(5→16→1, tanh)` → θ_i → [B, N+1]
 4. **Rotation:** `R(θ_i) · ψ_i` → ψ'_i → [B, N+1, 2]
-5. **Re-encoded each decode step** with `current_node_coords [B,2]`
+5. **Called ONCE** — psi_prime fixed for all decode steps
 
 **Baseline mode (`encoder_type="baseline"`, ablation):**
-1. **FeatureConstructor:** same 6D features (with dist_curr fallback)
-2. **BaselineEncoder:** `Linear(5→2) + ReLU` (STATIC — uses original 5D, no re-encoding)
+1. **FeatureConstructor:** same 5D features
+2. **BaselineEncoder:** `Linear(5→2) + ReLU` (STATIC — no re-encoding)
 
 ### Decoder (autoregressive, N steps)
 5. **ContextQuery:** `[ψ'_curr, cap/C, t/N, x_curr, y_curr]` → `Wq(6→2)` → `(query, current_coords)`
@@ -99,7 +96,7 @@ xᵢ(t) = [d/C, dist_depot, x, y, angle/π, dist(i, vₜ)]  ∈ ℝ⁶
 
 | Model | Actor | Full |
 |-------|-------|------|
-| QAP-DRL (all 3 changes) | ~157 | **~414** |
+| QAP-DRL (Changes 1+2) | ~139 | **~396** |
 | Pure DRL baseline | ~25 | ~283 |
 
 ---
@@ -124,15 +121,15 @@ ORTOOLS_EVAL_SIZE = 1_000  # OR-Tools subset (speed)
 
 | File | Changes | Status |
 |------|---------|--------|
-| `encoder/feature_constructor.py` | Change 3: ℝ⁵→ℝ⁶ | ✓ |
-| `encoder/amplitude_projection.py` | Change 3: input 5→6 | ✓ |
-| `encoder/rotation_mlp.py` | Change 3: input 5→6 | ✓ |
-| `encoder/qap_encoder.py` | Change 3: input=6, build_features() | ✓ |
+| `encoder/feature_constructor.py` | Static 5D (Change 3 reverted) | ✓ |
+| `encoder/amplitude_projection.py` | input_dim=5 (Change 3 reverted) | ✓ |
+| `encoder/rotation_mlp.py` | input_dim=5 (Change 3 reverted) | ✓ |
+| `encoder/qap_encoder.py` | input_dim=5, static (Change 3 reverted) | ✓ |
 | `decoder/context_query.py` | Change 2: ctx ℝ⁴→ℝ⁶ | ✓ |
 | `decoder/hybrid_scoring.py` | Change 1: mu_param, −μ·dist | ✓ |
-| `decoder/qap_decoder.py` | C1+C2+C3: per-step encode, encoder arg | ✓ |
-| `models/qap_policy.py` | All: psi_prime_3d per step | ✓ |
-| `training/ppo_agent.py` | C3: encoder_ref in rollout; C1: mu_val logged | ✓ |
+| `decoder/qap_decoder.py` | C1+C2: current_coords to scoring (no encoder arg) | ✓ |
+| `models/qap_policy.py` | C1+C2: feature_dim=5, broadcast psi_prime | ✓ |
+| `training/ppo_agent.py` | C1: mu_val logged | ✓ |
 | `training/evaluate.py` | v3: coord-aug+greedy (Change 3 fix) | ✓ |
 | `utils/ortools_solver.py` | v3: +solve_one_with_routes() | ✓ |
 | `train_n20.py` | All: mu_val logged, chart updated, ortools_route.png | ✓ |
@@ -151,12 +148,12 @@ ORTOOLS_EVAL_SIZE = 1_000  # OR-Tools subset (speed)
 7. Shared encoder between actor and critic
 8. psi_prime DETACHED before critic head
 9. demands depot = 0
-10. Feature order: [d/C, dist_depot, x, y, angle/π, dist_curr]
+10. Feature order: [d/C, dist_depot, x, y, angle/π]  (5D — Change 3 reverted)
 11. Angle normalized by π (range [-1, 1])
 12. ψ'_curr = zero vector at depot; x_curr,y_curr = actual depot coords (NOT zero)
 13. `context_query.forward()` returns TUPLE — always unpack: `query, current_coords = ...`
-14. `decoder.rollout()` must receive `encoder=enc_ref` in QAP mode (Change 3)
-15. `evaluate_actions()` rebuilds psi_prime per step — do NOT broadcast
+14. `decoder.rollout()` uses fixed psi_prime — no encoder arg, no per-step re-encoding
+15. `evaluate_actions()` broadcasts static psi_prime — do NOT rebuild per step
 16. Run train scripts from inside cvrp-ppo/
 
 ---
@@ -164,7 +161,7 @@ ORTOOLS_EVAL_SIZE = 1_000  # OR-Tools subset (speed)
 ## Validation Checks
 
 After any code change, verify:
-- [ ] `features.shape[-1] == 6` — 6D features after Change 3
+- [ ] `features.shape[-1] == 5` — 5D features (Change 3 reverted)
 - [ ] ψ' vectors: L2 norm = 1.0 (atol=1e-5) — QAP mode only
 - [ ] All tours feasible, all N customers visited exactly once
 - [ ] `context.shape[-1] == 6` — 6D context after Change 2
@@ -191,11 +188,11 @@ After any code change, verify:
 | P14 | OOM RTX 3050 | batch_size=256; empty_cache() |
 | P15 | context_query returns tuple | `query, current_coords = context_query(...)` |
 | P16 | mu_param missing | `nn.Parameter(torch.tensor(0.5))` |
-| P17 | feature_dim=5 after Change 3 | Check `FeatureBuilder.feature_dim == 6` |
-| P18 | encoder not passed to rollout | `decoder.rollout(..., encoder=enc_ref)` |
-| P19 | broadcast psi_prime in evaluate_actions | Must rebuild per step, NOT unsqueeze |
-| P20 | FeatureBuilder returns [B,N+1,5] | Assert `features.shape[-1] == 6` |
-| P21 | evaluate_augmented stochastic invalid with Change 3 | coord aug + greedy (evaluate.py v3) |
-| P22 | val_tour > greedy_tour in log = aug bug NOT overfitting | See P21. After fix, val_tour ≤ greedy_tour |
-| P23 | Reported gap inflated ~12% | val_tour from broken aug; real gap = greedy_tour-based |
+| P17 | Change 3 re-applied (dynamic 6D encoder) | REVERTED. Encoder must be STATIC 5D |
+| P18 | Per-step re-encoding attempted | NEVER re-encode. psi_prime fixed after initial encode |
+| P19 | evaluate_actions rebuilds psi_prime per step | Must BROADCAST static psi_prime |
+| P20 | feature_dim set to 6 | Must be 5. Change 3 reverted |
+| P21 | evaluate_augmented uses stochastic sampling | coord aug + greedy (evaluate.py v3) |
+| P22 | val_tour > greedy_tour in log | Check evaluate.py — stochastic aug broken |
+| P23 | λ goes negative or μ > 2 | Likely Change 3 contamination. Verify encoder is static 5D |
 | P24 | Dense grey gridlines on twinx panels | `.set_zorder(-1)`, `.patch.set_visible(False)`, `.grid(False)` |

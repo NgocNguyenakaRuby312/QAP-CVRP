@@ -8,7 +8,8 @@
 
 ## 0. Methodology Changes Applied (May 2026)
 
-All **three** changes are permanently part of the codebase. Total new params: +23.
+All **two** changes are permanently part of the codebase. Change 3 was reverted.
+Total new params from Changes 1+2: +5.
 
 ### Change 1 — Distance Proximity Penalty (§3.3.4)
 - File: `decoder/hybrid_scoring.py`
@@ -24,20 +25,16 @@ All **three** changes are permanently part of the codebase. Total new params: +2
 - `forward()` returns `(query [B,2], current_coords [B,2])` — always unpack both
 - +4 parameters
 
-### Change 3 — Dynamic Proximity Feature (§3.3.1)
-- Files: `encoder/feature_constructor.py`, `encoder/amplitude_projection.py`,
-  `encoder/rotation_mlp.py`, `encoder/qap_encoder.py`
-- Feature vector: ℝ⁵ → ℝ⁶, 6th feature = `dist(i, vₜ)` (dynamic, per decode step)
-- AmplitudeProjection: input_dim 5→6 (+2 params)
-- RotationMLP: input_dim 5→6, first layer 5×16→6×16 (+16 params)
-- Encoder re-called every decode step via `decoder.rollout(..., encoder=enc_ref)`
-- `evaluate_actions()` rebuilds features per step using `cur_coords_3d [mb,T,2]`
-- +18 parameters
+### Change 3 — Dynamic Proximity Feature (§3.3.1) — REVERTED
+- **Attempted** but reverted: per-step re-encoding destabilized training
+- λ → −1.6, μ → 3.4, val_tour → 13.7 (123% gap) over 22 epochs
+- Encoder remains STATIC: 5D features, computed once, psi_prime fixed
+- Files reverted: all 4 encoder files back to input_dim=5
 
-**Other files affected by Changes 1+2+3:**
-- `decoder/qap_decoder.py` — passes `current_coords` and `state["coords"]` to scoring; encoder arg in rollout()
-- `models/qap_policy.py` — `context_dim=6`, `feature_dim=6`, `mu_init` arg, per-step psi_prime_3d
-- `training/ppo_agent.py` — `update()` returns `mu_val`; enc_ref passed in collect_rollout()
+**Other files affected by Changes 1+2:**
+- `decoder/qap_decoder.py` — passes `current_coords` and `state["coords"]` to scoring
+- `models/qap_policy.py` — `context_dim=6`, `feature_dim=5`, `mu_init` arg, broadcast psi_prime
+- `training/ppo_agent.py` — `update()` returns `mu_val`
 - `train_n20.py` — logs `mu_val`, console column added, chart panel 8 shows λ+μ curves
 
 ---
@@ -57,25 +54,25 @@ THESIS CODE QAP_VRP/
 │   ├── train_ablation_n20.py        ← Ablation study: QAP-DRL vs Pure DRL
 │   ├── encoder/
 │   │   ├── __init__.py
-│   │   ├── feature_constructor.py   ← UPDATED (Change 3): 5D→6D, dist_curr feature
-│   │   ├── amplitude_projection.py  ← UPDATED (Change 3): input_dim 5→6
-│   │   ├── rotation_mlp.py          ← UPDATED (Change 3): input_dim 5→6
+│   │   ├── feature_constructor.py   ← Static 5D features (Change 3 REVERTED)
+│   │   ├── amplitude_projection.py  ← input_dim=5, W 2×5 (Change 3 REVERTED)
+│   │   ├── rotation_mlp.py          ← input_dim=5, 5→16→1 (Change 3 REVERTED)
 │   │   ├── rotation.py              ← UNCHANGED
-│   │   ├── qap_encoder.py           ← UPDATED (Change 3): input_dim=6, build_features(), per-step
+│   │   ├── qap_encoder.py           ← input_dim=5, static forward(state) (Change 3 REVERTED)
 │   │   └── baseline_encoder.py      ← Ablation: plain MLP, no norm/rotation
 │   ├── decoder/
 │   │   ├── __init__.py
 │   │   ├── context_query.py         ← UPDATED (Change 2): ctx ℝ⁴→ℝ⁶, Wq 2×4→2×6
 │   │   │                               returns (query [B,2], current_coords [B,2])
 │   │   ├── hybrid_scoring.py        ← UPDATED (Change 1): +μ·dist penalty, mu_param
-│   │   └── qap_decoder.py           ← UPDATED: passes current_coords to scoring
+│   │   └── qap_decoder.py           ← UPDATED: C1+C2 current_coords to scoring (no encoder arg)
 │   ├── environment/
 │   │   ├── __init__.py
 │   │   ├── cvrp_env.py              ← CVRP environment (reset, step, reward)
 │   │   └── state.py                 ← StateCVRP dataclass
 │   ├── models/
 │   │   ├── __init__.py
-│   │   └── qap_policy.py            ← UPDATED: context_dim=6, mu_init, evaluate_actions
+│   │   └── qap_policy.py            ← UPDATED: context_dim=6, feature_dim=5, mu_init, broadcast psi_prime
 │   ├── training/
 │   │   ├── __init__.py
 │   │   ├── ppo_agent.py             ← UPDATED (v5): update() returns mu_val in diag dict
@@ -179,13 +176,13 @@ Phase 3 (longer):  400 epochs, CosineAnnealingWarmRestarts   (after Phase 2)
 
 | Component | File | Params |
 |-----------|------|--------|
-| W, b (amplitude proj) | encoder/amplitude_projection.py | **14** (+2 Change 3) |
-| MLP rotation | encoder/rotation_mlp.py | **129** (+16 Change 3) |
+| W, b (amplitude proj) | encoder/amplitude_projection.py | 12 |
+| MLP rotation | encoder/rotation_mlp.py | 113 |
 | Wq (query proj, 2×6) | decoder/context_query.py | **12** (+4 Change 2) |
 | λ (interference) | decoder/hybrid_scoring.py | 1 |
 | μ (distance penalty) | decoder/hybrid_scoring.py | **1** (+1 Change 1) |
 | Critic MLP (2→64→1) | models/qap_policy.py | 257 |
-| **Total (QAP full)** | | **~414** |
+| **Total (QAP full)** | | **~396** |
 | **Total (baseline)** | | **~283** |
 
 ---
@@ -255,7 +252,7 @@ Fixes dense grey gridlines in dual-axis panels.
 4. Feasibility mask applied BEFORE softmax (set to -1e9)
 5. `context_query.forward()` returns a 2-tuple — always unpack
 6. `psi_prime` DETACHED before critic head in ppo_agent.update()
-7. Feature order: `[d/C, dist_depot, x, y, angle/π, dist_curr]` — 6D after Change 3
+7. Feature order: `[d/C, dist_depot, x, y, angle/π]` — 5D (Change 3 reverted)
 8. Angle feature normalized by π → range [-1, 1]
 9. At depot: ψ'_curr = [0, 0] but x_curr = depot_x, y_curr = depot_y (actual coords)
 10. `mu_param` must be `nn.Parameter`, not a plain float

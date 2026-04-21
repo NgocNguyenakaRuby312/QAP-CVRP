@@ -17,7 +17,7 @@ INPUT
   capacity:         scalar float
 
 FEATURE CONSTRUCTION
-  features:         [B, N+1, 6]     order: [d/C, dist, x, y, angle/pi, dist_curr]
+  features:         [B, N+1, 5]     order: [d/C, dist_depot, x, y, angle/pi]
 
 ENCODER — QAP mode
   psi (after proj):     [B, N+1, 2]     unit norm!
@@ -110,7 +110,7 @@ evaluate_actions() PPO update path
 
 ### P11: Feature Order Mismatch
 **Symptom:** Model trains but performs poorly; amplitude projection learns wrong feature mapping.
-**Fix:** Verify feature order matches thesis: `[d/C, dist_depot, x, y, angle/pi, dist_curr]` (6D).
+**Fix:** Verify feature order: `[d/C, dist_depot, x, y, angle/pi]` (5D, Change 3 reverted).
 
 ### P12: Angle Not Normalized by pi
 **Symptom:** Feature index [4] has range [-pi, pi] instead of [-1, 1]; dominates other features.
@@ -282,11 +282,11 @@ See Section 5 above for fix.
 ```python
 norms = psi_prime.norm(dim=-1)
 assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), "norm violation"
-assert features.shape == (B, N+1, 6)
+assert features.shape == (B, N+1, 5)
 assert psi_prime.shape == (B, N+1, 2)
 assert features[0, 0, 0].item() == 0.0, "depot demand ratio should be 0"
 assert features[:, :, 4].abs().max() <= 1.0, "angle feature should be in [-1, 1]"
-assert features.shape[-1] == 6, "must be 6D after Change 3"
+assert features.shape[-1] == 5, "must be 5D (Change 3 reverted)"
 ```
 
 ### Decoder Checks (with Changes 1+2)

@@ -144,19 +144,19 @@ Input: coords [B, N+1, 2], demands [B, N+1], capacity C
 └───────────────────────────────────────────────────────────────────────┘
 ```
 
-### Parameter Budget (updated May 2026 — all 3 changes)
+### Parameter Budget (Changes 1+2 — Change 3 reverted)
 
 | Component | Specification | Parameters |
 |-----------|--------------|------------|
-| W (amplitude projection) | **2 × 6** (+2 Change 3) | **12** |
+| W (amplitude projection) | 2 × 5 | 10 |
 | b (projection bias) | 2 × 1 | 2 |
-| MLP (rotation) | **6→16→1** (+16 Change 3) | **~129** |
+| MLP (rotation) | 5→16→1 | ~113 |
 | W_q (query projection) | **2 × 6**, no bias (+4 Change 2) | **12** |
 | λ (interference balance) | scalar | 1 |
 | μ (distance penalty) | **scalar** (+1 Change 1) | **1** |
 | Critic MLP | 2→64→1 | ~257 |
-| **Actor total** | | **~157** |
-| **Full total** | | **~414** |
+| **Actor total** | | **~139** |
+| **Full total** | | **~396** |
 
 ### Ablation Baseline (variant b)
 

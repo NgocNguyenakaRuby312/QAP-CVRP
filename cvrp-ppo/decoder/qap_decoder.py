@@ -10,28 +10,11 @@ Change 1 + Change 2 (May 2026):
     - hybrid scoring now receives current_coords and all_coords
     - context_dim defaults to 6 (was 4)
 
-Change 3 (May 2026 — §3.3.1 Dynamic proximity feature):
-    FeatureBuilder now takes current_node_coords [B, 2] to compute
-    feature[5] = dist(i, current_node) at each decoding step.
-
-    QAPDecoder.forward() and rollout() now require an encoder reference
-    so they can re-encode nodes at each step with the current vehicle
-    position. The encoder is passed at construction time via the
-    `encoder` argument (optional — if None, Change 3 is skipped and
-    psi_prime is used as-is, maintaining backward compatibility for
-    ablation baselines and tests that pre-cache psi_prime).
-
-    rollout() updated:
-        - Accepts optional `encoder` argument
-        - At each step, re-encodes features with current_coords via
-          encoder.build_features(state, current_coords) +
-          encoder.qap_encoder(features)
-        - psi_prime cached only for initial kNN computation (spatial kNN
-          does not change — based on raw coords, not amplitude)
-
-    IMPORTANT: Re-encoding per step costs O(N) extra work per step,
-    making the overall episode complexity O(N²) in feature construction
-    (was O(N) once). For N≤100 this is negligible vs the O(Nk) scoring.
+Change 3 REVERTED:
+    Dynamic per-step re-encoding was attempted but reverted.
+    Caused catastrophic training failure: lambda went negative, mu exploded,
+    val_tour diverged to 123% gap. Encoder is STATIC: psi_prime fixed.
+    rollout() has no encoder argument. No per-step re-encoding.
 """
 
 import torch
@@ -95,28 +78,24 @@ class QAPDecoder(nn.Module):
 
     def rollout(
         self,
-        psi_prime:   torch.Tensor,    # [B, N+1, 2]  initial encode (used for kNN)
+        psi_prime:   torch.Tensor,    # [B, N+1, 2]  fixed for all steps
         env_state:   dict,
         knn_indices: torch.Tensor,    # [B, N+1, k]  precomputed — does not change
         env,
         greedy:      bool = False,
-        encoder      = None,          # Change 3: FullEncoder, optional
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Autoregressive loop until all customers visited.
 
-        Change 3: if encoder is provided, re-encodes nodes at each step
-        using the current vehicle coordinates as the dynamic 6th feature.
-        If encoder is None, uses the cached psi_prime throughout (backward
-        compatible — used by ablation baseline and pure greedy eval).
+        psi_prime is STATIC — computed once before calling rollout().
+        No per-step re-encoding (Change 3 reverted).
 
         Args:
-            psi_prime:   [B, N+1, 2]  encoder output from initial encode
+            psi_prime:   [B, N+1, 2]  encoder output (fixed)
             env_state:   dict         initial environment state
             knn_indices: [B, N+1, k]  precomputed spatial kNN
             env:         CVRPEnv      dict-based step interface
             greedy:      True=argmax, False=Categorical sample
-            encoder:     FullEncoder (optional) — for Change 3 re-encoding
 
         Returns:
             actions:     [B, T]  selected nodes
@@ -131,25 +110,13 @@ class QAPDecoder(nn.Module):
         all_actions   = []
         all_log_probs = []
 
-        # Current psi_prime — re-computed per step if encoder provided (Change 3)
-        psi_step = psi_prime
-
         max_steps = 3 * n_customers + 1
         for step in range(max_steps):
             if state["done"].all():
                 break
 
-            # Change 3: re-encode with current vehicle coordinates
-            if encoder is not None:
-                cur_idx    = state["current_node"]                     # [B]
-                cur_coords = state["coords"][
-                    torch.arange(B, device=device), cur_idx            # [B, 2]
-                ]
-                features  = encoder.build_features(state, cur_coords)  # [B, N+1, 6]
-                psi_step  = encoder.qap_encoder(features)              # [B, N+1, 2]
-
             log_probs, mask = self.forward(
-                state, psi_step, knn_indices, step, n_customers
+                state, psi_prime, knn_indices, step, n_customers
             )                                                          # [B, N+1]
 
             if greedy:

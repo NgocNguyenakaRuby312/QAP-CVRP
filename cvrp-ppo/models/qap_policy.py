@@ -3,16 +3,16 @@ models/qap_policy.py
 =====================
 QAPPolicy — actor + critic (shared encoder) for PPO.
 
-Parameter budget after Changes 1 + 2 + 3 (§3.3.1 / §3.3.3 / §3.3.4):
-    W (amplitude proj): 2×6 = 12  (+2 Change 3, was 10)
+Parameter budget after Changes 1 + 2 (§3.3.3 / §3.3.4):
+    W (amplitude proj): 2×5 = 10
     b (proj bias):      2
-    MLP rotation:       6×16+16+16×1+1 = 129  (+16 Change 3, was 113)
+    MLP rotation:       5×16+16+16×1+1 = 113
     W_q:                2×6 = 12   (+4 Change 2, was 8)
     λ:                  1
     μ:                  1          (+1 Change 1)
     Critic MLP:         2→64→1 = 257
-    Actor total:        ~157
-    Full total:         ~414
+    Actor total:        ~139
+    Full total:         ~396
 
 Changes vs original:
     Change 1 (§3.3.4 Scoring):
@@ -24,19 +24,13 @@ Changes vs original:
         Wq ∈ ℝ^{2×6} (was 2×4)
         context_query.forward() returns (query, current_coords)
 
-    Change 3 (§3.3.1 Dynamic feature):
-        Feature vector xᵢ(t) ∈ ℝ⁶: adds dist(i, vₜ) as 6th element
-        AmplitudeProjection: input_dim 5→6 (+2 params)
-        RotationMLP: input_dim 5→6, first layer 5×16→6×16 (+16 params)
-        FullEncoder.forward() accepts current_node_coords [B,2] optional arg
-        QAPDecoder.rollout() receives encoder ref for per-step re-encoding
-        evaluate_actions() re-builds features per step with cur_coords_3d
+    Change 3 REVERTED — dynamic per-step re-encoding destabilized training.
+    Encoder is STATIC: 5D features, computed once, psi_prime fixed for all steps.
 
-    evaluate_actions() updated (Changes 1+2+3):
-        - features_3d [mb, T, N+1, 6] built per-step with cur_coords_3d
-        - psi_prime_3d [mb, T, N+1, 2] encoded per-step
+    evaluate_actions() (Changes 1+2 only):
+        - psi_prime broadcast across T steps (static — NOT rebuilt per step)
         - ctx [mb, T, 6] with x_curr, y_curr (Change 2)
-        - dist_to_nodes [mb, T, N+1] for distance penalty (Change 1)
+        - dist_to_nodes [mb, T, N+1] for μ·dist penalty (Change 1)
         - 3-term scoring: context + interference + distance penalty
 """
 
@@ -55,7 +49,7 @@ class QAPPolicy(nn.Module):
     Full actor-critic with shared encoder.
 
     Args:
-        feature_dim:   node feature size (default 6 — Change 3: was 5)
+        feature_dim:   node feature size (default 5)
         hidden_dim:    rotation MLP hidden size (default 16)
         knn_k:         kNN neighbourhood size (default 5)
         lambda_init:   initial hybrid λ (default 0.1)
@@ -65,7 +59,7 @@ class QAPPolicy(nn.Module):
 
     def __init__(
         self,
-        feature_dim:   int   = 6,          # Change 3: was 5
+        feature_dim:   int   = 5,
         hidden_dim:    int   = 16,
         knn_k:         int   = 5,
         lambda_init:   float = 0.1,
@@ -95,24 +89,19 @@ class QAPPolicy(nn.Module):
         """
         Roll out one complete episode.
 
-        Change 3: encoder reference passed to decoder.rollout() so that
-        psi_prime is re-computed at each step with the current vehicle
-        coordinates as feature[5].
+        Encoder is called ONCE. psi_prime is fixed for all decode steps.
+        Changes 1+2 are active in the decoder (context grounding + distance penalty).
 
         Returns:
             actions:      [B, T]
             log_probs:    [B, T]
             sum_log_prob: [B]
         """
-        # Initial encode — current_node_coords=None → feature[5]=dist(i,depot)
         psi_prime, _, knn_indices = self.encoder(state)                # [B,N+1,2], _, [B,N+1,k]
 
-        # Change 3: pass encoder so rollout() re-encodes per step
-        enc_ref = self.encoder if self.encoder_type == "qap" else None
         actions, log_probs, _ = self.decoder.rollout(
             psi_prime, state, knn_indices, env,
             greedy=deterministic,
-            encoder=enc_ref,                                           # Change 3
         )
         return actions, log_probs, log_probs.sum(dim=1)
 
@@ -129,11 +118,10 @@ class QAPPolicy(nn.Module):
         Vectorized re-implementation across all T steps simultaneously.
 
         Changes vs original:
-            Change 3: features rebuilt per-step with cur_coords_3d [mb,T,2]
-                      so that feature[5]=dist(i,vₜ) varies across steps.
-                      psi_prime_3d [mb,T,N+1,2] is computed for each step.
             Change 2: ctx [mb,T,6] includes x_curr,y_curr
-            Change 1: dist_to_nodes [mb,T,N+1] for μ·dist penalty
+            Change 1: dist_to_nodes [mb,T,N+1] for mu dist penalty
+            psi_prime is STATIC: broadcast across T steps, NOT rebuilt per step
+            (Change 3 reverted)
 
         Returns:
             lp_new:  [B, T]   log-prob of each taken action
@@ -192,23 +180,9 @@ class QAPPolicy(nn.Module):
             1, all_cur.unsqueeze(-1).expand(mb, T, 2)                  # [mb, T, 2]
         )                                                               # [mb, T, 2]
 
-        # ── Change 3: Re-build features per step with cur_coords_3d ──
-        # For QAP encoder only — baseline encoder does not use Change 3
-        if self.encoder_type == "qap":
-            # Build features for every (instance, step) pair
-            # cur_coords_3d: [mb, T, 2] → loop T steps, build [mb, N+1, 6] each
-            # Stack into [mb, T, N+1, 6] then encode → [mb, T, N+1, 2]
-            psi_prime_list = []
-            for t_idx in range(T):
-                cur_c_t  = cur_coords_3d[:, t_idx, :]                  # [mb, 2]
-                feats_t  = self.encoder.build_features(instance, cur_c_t)  # [mb, N+1, 6]
-                psi_t    = self.encoder.qap_encoder(feats_t)            # [mb, N+1, 2]
-                psi_prime_list.append(psi_t)
-            # [mb, N+1, 2] × T → stack on dim1 → [mb, T, N+1, 2]
-            psi_prime_3d = torch.stack(psi_prime_list, dim=1)          # [mb, T, N+1, 2]
-        else:
-            # Baseline: use initial psi_prime, broadcast across T
-            psi_prime_3d = psi_prime.unsqueeze(1).expand(mb, T, -1, -1)  # [mb,T,N+1,2]
+        # ── psi_prime is STATIC — broadcast across T steps ────────────
+        # Encoder ran once; same psi_prime for all decode steps.
+        psi_prime_3d = psi_prime.unsqueeze(1).expand(mb, T, -1, -1)     # [mb,T,N+1,2]
 
         # ── ψ'_curr for all (instance, step) pairs ────────────────────
         # Gather from per-step psi_prime_3d using all_cur
