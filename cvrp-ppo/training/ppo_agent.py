@@ -23,6 +23,21 @@ FIX LOG:
       freezing the policy from ~epoch 160 onward regardless of entropy_coef.
       At eta_min=1e-5 the LR floor is 10× higher, keeping updates alive
       through all 200 epochs.
+  v5 (Changes 1+2):
+    - update() diagnostic dict now also returns mu_val — the current value
+      of the learnable distance penalty scalar μ (Change 1, §3.3.4).
+  v6 (Change 3):
+    - collect_rollout() sampled pass now passes encoder reference to
+      decoder.rollout() so that feature[5]=dist(i,vₜ) is computed at
+      each decoding step with the actual vehicle position (Change 3).
+    - Greedy baseline pass likewise passes encoder reference.
+    - update() minibatch path: feature_builder called without
+      current_node_coords → feature[5] falls back to dist(i,depot),
+      which is correct since evaluate_actions() rebuilds per-step
+      features internally with cur_coords_3d (Change 3 in qap_policy.py).
+    - Critic value head still uses initial psi_prime_mb (t=0 encode) —
+      acceptable since the critic uses mean-pooled representations and
+      does not need per-step proximity features.
 """
 
 import os
@@ -46,7 +61,7 @@ class PPOTrainer:
     PPO trainer for CVRP with greedy rollout baseline (AM/POMO-style).
 
     collect_rollout() stores rich rollout stats in self._rollout_stats.
-    update() returns a 15-field diagnostic dict covering every failure mode:
+    update() returns a 16-field diagnostic dict covering every failure mode:
         policy_loss, value_loss, entropy        — three separate loss terms
         grad_norm                               — detect explosion
         clip_fraction                           — detect over-clipping
@@ -54,6 +69,7 @@ class PPOTrainer:
         adv_mean, adv_std                       — learning signal quality
         train_tour, greedy_tour, improvement    — policy vs baseline
         lambda_val                              — is λ learning?
+        mu_val                                  — is μ learning? (Change 1)
         lr                                      — cosine schedule tracking
     """
 
@@ -115,16 +131,12 @@ class PPOTrainer:
         """
         Collect one rollout (sampled + greedy baseline).
 
-        Stores diagnostic stats in self._rollout_stats:
-            train_tour   — mean sampled tour length (positive)
-            greedy_tour  — mean greedy baseline tour length (positive)
-            improvement  — greedy_tour − train_tour  (positive = greedy better,
-                           negative = sampled somehow beat greedy)
-            adv_raw_std  — std of raw advantages BEFORE normalisation;
-                           near-zero signals no learning gradient
+        Change 3 (v6): encoder reference passed to decoder.rollout() so that
+        feature[5]=dist(i,vₜ) is recomputed at each step with actual vehicle
+        position. For baseline encoder_type, encoder=None (no Change 3).
 
-        Returns:
-            mean sampled tour length (negative reward, positive distance)
+        Stores diagnostic stats in self._rollout_stats.
+        Returns mean sampled tour length (positive distance).
         """
         instance = self.generator.generate(self.batch_size, device=self.device)
         n_cust   = self.generator.num_loc
@@ -132,20 +144,41 @@ class PPOTrainer:
         self.buffer.clear()
         self.policy.eval()
 
+        # Change 3: pass encoder ref for per-step re-encoding (QAP mode only)
+        enc_ref = (self.policy.encoder
+                   if self.policy.encoder_type == "qap" else None)    # Change 3
+
         with torch.no_grad():
             state_sample = self.env.reset(instance)
+            # Initial encode — current_node_coords=None → feature[5]=dist(i,depot)
             psi_prime, _, knn_indices = self.policy.encoder(state_sample)
             self._last_knn = knn_indices
 
             # ── Pass 1: Sampled rollout ────────────────────────────────
-            all_actions = []
-            state       = state_sample
-            max_steps   = 3 * n_cust + 1
+            # Change 3: re-encode per step with current vehicle coords
+            all_actions       = []
+            all_log_probs_buf = []
+            state             = state_sample
+            device            = psi_prime.device
+            B                 = psi_prime.shape[0]
+            psi_step          = psi_prime
+
+            max_steps = 3 * n_cust + 1
             for step in range(max_steps):
                 if state["done"].all():
                     break
+
+                # Change 3: re-encode with current vehicle coords
+                if enc_ref is not None:
+                    cur_idx    = state["current_node"]                 # [B]
+                    cur_coords = state["coords"][
+                        torch.arange(B, device=device), cur_idx        # [B, 2]
+                    ]
+                    feats_t   = enc_ref.build_features(state, cur_coords)  # [B, N+1, 6]
+                    psi_step  = enc_ref.qap_encoder(feats_t)               # [B, N+1, 2]
+
                 log_probs, _ = self.policy.decoder(
-                    state, psi_prime, knn_indices, step, n_cust
+                    state, psi_step, knn_indices, step, n_cust
                 )
                 dist   = torch.distributions.Categorical(logits=log_probs)
                 action = dist.sample()
@@ -159,9 +192,12 @@ class PPOTrainer:
             reward_sample = self.env.get_reward(state, actions_t)      # [B] negative
 
             # ── Pass 2: Greedy rollout (baseline) ──────────────────────
+            # Change 3: pass encoder ref so greedy also uses dynamic features
             state_greedy = self.env.reset(instance)
             _, _, tour_len_greedy = self.policy.decoder.rollout(
-                psi_prime, state_greedy, knn_indices, self.env, greedy=True
+                psi_prime, state_greedy, knn_indices, self.env,
+                greedy=True,
+                encoder=enc_ref,                                       # Change 3
             )
             reward_greedy = -tour_len_greedy                           # [B] negative
 
@@ -172,20 +208,19 @@ class PPOTrainer:
         self._last_instance = instance
         self._last_actions  = actions_t
 
-        # ── Rollout diagnostic stats ───────────────────────────────────
-        train_tour  = (-reward_sample).mean().item()                   # positive distance
-        greedy_tour = tour_len_greedy.mean().item()                    # positive distance
+        train_tour  = (-reward_sample).mean().item()
+        greedy_tour = tour_len_greedy.mean().item()
         self._rollout_stats = {
             "train_tour":  train_tour,
             "greedy_tour": greedy_tour,
-            "improvement": greedy_tour - train_tour,                   # >0 greedy is better
-            "adv_raw_std": advantage.std().item(),                     # near-0 = no signal
+            "improvement": greedy_tour - train_tour,
+            "adv_raw_std": advantage.std().item(),
         }
 
         return reward_sample.mean().item()
 
     # ─────────────────────────────────────────────────────────────────────────
-    # PPO update — returns full 15-field diagnostic dict
+    # PPO update — returns full 16-field diagnostic dict
     # ─────────────────────────────────────────────────────────────────────────
 
     def update(self) -> dict:
@@ -193,36 +228,27 @@ class PPOTrainer:
         Perform ppo_epochs × n_minibatches gradient updates.
 
         CRITICAL: psi_prime DETACHED before critic head to stop value gradient
-        from corrupting the shared encoder.  See docstring on class.
+        from corrupting the shared encoder.
 
-        Returns a comprehensive diagnostic dict with 15 fields:
-            policy_loss    — clipped surrogate loss (actor); always negative
-                             more negative = stronger gradient signal
-            value_loss     — critic MSE (detached from encoder)
-            entropy        — mean policy entropy
-            grad_norm      — mean gradient L2 norm before clipping
-                             >10 → exploding, <1e-4 → vanishing
-            clip_fraction  — fraction of PPO ratios that hit the ε boundary
-                             >0.3 → policy changing too fast
-            ratio_mean     — mean probability ratio π_new/π_old
-                             should stay near 1.0
-            adv_mean       — mean normalised advantage (should be ~0)
-            adv_std        — std of raw advantages (near-0 = no signal)
-            train_tour     — mean sampled tour length this rollout
-            greedy_tour    — mean greedy baseline tour length
-            improvement    — greedy_tour − train_tour
-            lambda_val     — current value of learnable λ
-            lr             — current learning rate (cosine schedule)
+        Change 3 note: feature_builder(init_instance) is called without
+        current_node_coords → feature[5] = dist(i, depot) fallback.
+        This is correct because evaluate_actions() in qap_policy.py
+        rebuilds per-step features internally with cur_coords_3d.
+        The psi_prime_mb passed here is used ONLY for the critic value
+        head (get_value), which uses the mean-pooled initial encoding.
+
+        Returns a comprehensive diagnostic dict with 16 fields:
+            policy_loss, value_loss, entropy, grad_norm, clip_fraction,
+            ratio_mean, adv_mean, adv_std, train_tour, greedy_tour,
+            improvement, lambda_val, mu_val (Change 1), lr
         """
         self.policy.train()
 
-        # Normalise advantages
         adv_raw = self.buffer.advantages                                # [B]
         adv_std = adv_raw.std()
         if adv_std > 1e-8:
             self.buffer.advantages = (adv_raw - adv_raw.mean()) / (adv_std + 1e-8)
 
-        # Accumulators
         total_ploss = total_vloss = total_ent = 0.0
         total_gnorm = total_clip  = total_ratio = 0.0
         n_updates   = 0
@@ -231,12 +257,13 @@ class PPOTrainer:
             for (idx, lp_old, acts, advs, rets) in \
                     self.buffer.get_minibatches(self.n_minibatches):
 
-                mb = idx.shape[0]
-
                 init_instance = {
                     k: v[idx] if isinstance(v, torch.Tensor) else v
                     for k, v in self._last_instance.items()
                 }
+                # Change 3: feature_builder returns [mb, N+1, 6] with fallback
+                # feature[5]=dist(i,depot). evaluate_actions() overrides this
+                # internally with per-step cur_coords_3d.
                 features_mb  = self.policy.encoder.feature_builder(init_instance)
                 psi_prime_mb = self.policy.encoder.qap_encoder(features_mb)  # [mb,N+1,2]
                 knn_mb       = self._last_knn[idx]                            # [mb,N+1,k]
@@ -254,15 +281,15 @@ class PPOTrainer:
                 ) * adv_t
                 p_loss = -torch.min(surr1, surr2).mean()
 
-                # Clip fraction: how many ratios hit the boundary
                 clipped = ((ratio < 1 - self.clip_epsilon) |
                            (ratio > 1 + self.clip_epsilon)).float().mean().item()
 
                 # ── Value loss — DETACHED (encoder protected) ──────────
+                # Critic uses initial psi_prime_mb — acceptable since critic
+                # mean-pools representations and does not need dynamic features
                 v_new  = self.policy.get_value(psi_prime_mb.detach())   # [mb]
                 v_loss = ((v_new - rets) ** 2).mean()
 
-                # ── Entropy bonus ──────────────────────────────────────
                 ent_loss = -entropy.mean()
 
                 loss = p_loss + self.value_coef * v_loss + self.entropy_coef * ent_loss
@@ -270,10 +297,9 @@ class PPOTrainer:
                 self.optimizer.zero_grad()
                 loss.backward()
 
-                # Gradient norm BEFORE clipping
                 raw_gnorm = nn.utils.clip_grad_norm_(
                     self.policy.parameters(), self.max_grad_norm
-                ).item()                                                # clip_grad_norm_ returns the norm
+                ).item()
 
                 self.optimizer.step()
                 self.scheduler.step()
@@ -288,29 +314,25 @@ class PPOTrainer:
 
         n = n_updates
         return {
-            # ── Three separate losses (not mixed) ─────────────────────
-            "policy_loss":    total_ploss / n,   # negative; more negative = better
+            # ── Three separate losses ─────────────────────────────────
+            "policy_loss":    total_ploss / n,
             "value_loss":     total_vloss / n,
             "entropy":        total_ent   / n,
-
-            # ── Gradient health ────────────────────────────────────────
-            "grad_norm":      total_gnorm / n,   # >10 explosion, <1e-4 vanishing
-
-            # ── PPO ratio health ───────────────────────────────────────
-            "clip_fraction":  total_clip  / n,   # >0.3 too much policy change
-            "ratio_mean":     total_ratio / n,   # should stay near 1.0
-
-            # ── Advantage / learning signal quality ────────────────────
-            "adv_mean":  self.buffer.advantages.mean().item(),          # ~0 after norm
-            "adv_std":   self._rollout_stats["adv_raw_std"],            # near-0 = no signal
-
-            # ── Policy vs baseline ──────────────────────────────────────
+            # ── Gradient health ───────────────────────────────────────
+            "grad_norm":      total_gnorm / n,
+            # ── PPO ratio health ──────────────────────────────────────
+            "clip_fraction":  total_clip  / n,
+            "ratio_mean":     total_ratio / n,
+            # ── Advantage / learning signal quality ───────────────────
+            "adv_mean":  self.buffer.advantages.mean().item(),
+            "adv_std":   self._rollout_stats["adv_raw_std"],
+            # ── Policy vs baseline ─────────────────────────────────────
             "train_tour":    self._rollout_stats["train_tour"],
             "greedy_tour":   self._rollout_stats["greedy_tour"],
-            "improvement":   self._rollout_stats["improvement"],        # greedy−sampled
-
-            # ── Model state ────────────────────────────────────────────
+            "improvement":   self._rollout_stats["improvement"],
+            # ── Model state ───────────────────────────────────────────
             "lambda_val":    self.policy.decoder.hybrid.lambda_param.item(),
+            "mu_val":        self.policy.decoder.hybrid.mu_param.item(),  # Change 1
             "lr":            self.optimizer.param_groups[0]["lr"],
         }
 

@@ -100,6 +100,83 @@ def solve_one(coords_np: np.ndarray, demands_np: np.ndarray,
     return total / SCALE, solve_time
 
 
+def solve_one_with_routes(
+    coords_np: np.ndarray,
+    demands_np: np.ndarray,
+    capacity: int,
+    time_limit: float,
+) -> tuple:
+    """
+    Solve one CVRP instance and return the actual routes.
+
+    Args:
+        coords_np:  [N+1, 2]  depot at index 0
+        demands_np: [N+1]     depot demand = 0
+        capacity:   int
+        time_limit: float     seconds budget
+
+    Returns:
+        (tour_length: float, routes: list[list[int]])
+        routes is a list of vehicle routes, each a list of customer node indices
+        (depot=0 is excluded from each route — just the customer stops).
+        Returns (nan, []) if infeasible.
+    """
+    N = len(demands_np) - 1
+    coords_int = [
+        (int(coords_np[i, 0] * SCALE), int(coords_np[i, 1] * SCALE))
+        for i in range(N + 1)
+    ]
+
+    dist = [
+        [_euclidean_int(coords_int[i], coords_int[j]) for j in range(N + 1)]
+        for i in range(N + 1)
+    ]
+
+    manager = pywrapcp.RoutingIndexManager(N + 1, N, 0)
+    routing  = pywrapcp.RoutingModel(manager)
+
+    def dist_cb(fi, ti):
+        return dist[manager.IndexToNode(fi)][manager.IndexToNode(ti)]
+    ti = routing.RegisterTransitCallback(dist_cb)
+    routing.SetArcCostEvaluatorOfAllVehicles(ti)
+
+    def dem_cb(fi):
+        return int(demands_np[manager.IndexToNode(fi)])
+    di = routing.RegisterUnaryTransitCallback(dem_cb)
+    routing.AddDimensionWithVehicleCapacity(di, 0, [capacity] * N, True, "Cap")
+
+    params = pywrapcp.DefaultRoutingSearchParameters()
+    params.first_solution_strategy = (
+        routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
+    )
+    params.local_search_metaheuristic = (
+        routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
+    )
+    params.time_limit.seconds = int(max(1, time_limit))
+
+    sol = routing.SolveWithParameters(params)
+    if sol is None:
+        return float("nan"), []
+
+    # Extract routes and compute tour length
+    total  = 0
+    routes = []
+    for v in range(N):
+        idx   = routing.Start(v)
+        route = []
+        while not routing.IsEnd(idx):
+            node = manager.IndexToNode(idx)
+            nxt  = sol.Value(routing.NextVar(idx))
+            total += routing.GetArcCostForVehicle(idx, nxt, v)
+            if node != 0:                    # skip depot in route list
+                route.append(node)
+            idx = nxt
+        if route:                            # only non-empty routes
+            routes.append(route)
+
+    return total / SCALE, routes
+
+
 # ── Batch computation + save ──────────────────────────────────────────────────
 
 def compute_and_save_ref(

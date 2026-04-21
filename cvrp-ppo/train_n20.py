@@ -15,9 +15,15 @@ Changelog:
        ENTROPY_COEF  0.02  → 0.05  (keep H[π] > 0.5 past ep 100)
        EPOCH_SIZE    51200 → 128000 (thesis spec: 128K instances/epoch)
        KNN_K         5     → 10    (N=20: k=10 covers 50% of graph)
-       Evaluation    greedy → augmented ×8 (sample 8 solutions, return best)
+       Evaluation    greedy → augmented ×8 (coord aug + greedy, return best)
+                     NOTE: stochastic aug is invalid with Change 3 (dynamic encoder).
+                     Fixed in evaluate.py: 8 geometric transforms × greedy decoding.
        BATCHES_PER_EPOCH recalculated automatically from EPOCH_SIZE
        TOTAL_OPT_STEPS   recalculated automatically
+  v9 — Changes 1+2 (Methodology May 2026):
+       Change 1 (§3.3.4): Score += −μ·dist(vₜ,vⱼ).  μ logged as mu_val.
+       Change 2 (§3.3.3): ctx ℝ⁴→ℝ⁶, Wq 2×4→2×6 (x_curr,y_curr appended).
+       mu_val added to train_log.jsonl, console header, and chart panel 8.
 """
 
 import os, sys, time, json, shutil
@@ -47,9 +53,10 @@ from training.evaluate import evaluate, evaluate_augmented
 from utils.seed import set_seed
 from utils.data_generator import generate_instances, load_dataset
 from utils.ortools_refs import ensure_ortools_ref
+from utils.ortools_solver import solve_one_with_routes, ORTOOLS_OK
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Settings  — Phase 1 values marked with (P1)
+# Settings  — Phase 1b values marked with (P1b), Change notes with (C1/C2)
 # ═══════════════════════════════════════════════════════════════════════════
 GRAPH_SIZE           = 20
 CAPACITY             = 30
@@ -57,19 +64,20 @@ BATCH_SIZE           = 512             # (P1b) was 256 — larger batch → wide
 N_EPOCHS             = 200
 EPOCH_SIZE           = 128_000          # (P1) was 51_200 — thesis spec
 LR                   = 1e-4
-ENTROPY_COEF         = 0.01             # (P1b) was 0.05 — 0.05 kept entropy too high, collapsing adv signal
-                                        # thesis spec is 0.01; entropy never collapsed (floor=0.55) so 0.05 not needed
+ENTROPY_COEF         = 0.01             # (P1b) was 0.05 — adv collapse at 0.05
 VALUE_COEF           = 0.5
-KNN_K                = 10              # (P1) was 5 — covers 50% of N=20 graph
+KNN_K                = 10              # (P1) covers 50% of N=20 graph
+MU_INIT              = 0.5             # (C1) distance penalty scalar, learnable
 SEED                 = 1234
-BATCHES_PER_EPOCH    = EPOCH_SIZE // BATCH_SIZE          # 500
+BATCHES_PER_EPOCH    = EPOCH_SIZE // BATCH_SIZE          # 250
 TOTAL_OPT_STEPS      = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8   # 1,200,000
 AUG_SAMPLES          = 8               # (P1) inference augmentation: sample ×8, take best
 OUTPUT_DIR           = os.path.join(SCRIPT_DIR, "outputs", "n20")
 EPOCH_DIR            = os.path.join(OUTPUT_DIR, "epochs")
 ARCHIVE_DIR          = os.path.join(OUTPUT_DIR, "Archive")
 VAL_PATH             = os.path.join(SCRIPT_DIR, "datasets", "val_n20.pkl")
-VAL_EVAL_SIZE        = 10_000         # key paper standard: 10K instances for reliable val_tour
+VAL_EVAL_SIZE        = 10_000         # model validation: 10K instances (key paper standard, fast neural eval)
+ORTOOLS_EVAL_SIZE    = 1_000           # OR-Tools ref: 1K instances only (2s/inst × 1K = ~33 min)
 ORTOOLS_TIME_LIMIT   = 2.0
 
 
@@ -138,12 +146,13 @@ def _load_chart_history(log_path):
     epochs_hist = []; tour_hist   = []; reward_hist = []
     ploss_hist  = []; aploss_hist = []; lr_hist     = []
     vloss_hist  = []; ent_hist    = []; eloss_hist  = []
-    gnorm_hist  = []; adv_hist    = []; clip_hist   = []; lam_hist = []
+    gnorm_hist  = []; adv_hist    = []; clip_hist   = []
+    lam_hist    = []; mu_hist     = []  # (C1) mu_val history
 
     if not os.path.exists(log_path):
         return (epochs_hist, tour_hist, reward_hist, ploss_hist, aploss_hist,
                 lr_hist, vloss_hist, ent_hist, eloss_hist,
-                gnorm_hist, adv_hist, clip_hist, lam_hist)
+                gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist)
     try:
         with open(log_path, "r") as f:
             for line in f:
@@ -166,19 +175,20 @@ def _load_chart_history(log_path):
                 adv_hist.append(row.get("adv_std") or 0.0)
                 clip_hist.append((row.get("clip_fraction") or 0.0) * 100.0)
                 lam_hist.append(row.get("lambda_val") or 0.0)
+                mu_hist.append(row.get("mu_val") or MU_INIT)   # (C1)
     except Exception as e:
         print(f"  [chart history] Could not reload: {e}")
     if epochs_hist:
         print(f"  Chart history  : reloaded {len(epochs_hist)} epochs from train_log.jsonl")
     return (epochs_hist, tour_hist, reward_hist, ploss_hist, aploss_hist,
             lr_hist, vloss_hist, ent_hist, eloss_hist,
-            gnorm_hist, adv_hist, clip_hist, lam_hist)
+            gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist)
 
 
 def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
                  ploss_hist, aploss_hist, lr_hist,
                  vloss_hist, ent_hist, eloss_hist,
-                 gnorm_hist, adv_hist, clip_hist, lam_hist,
+                 gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist,
                  ORTOOLS_REF):
     """Redraw all 8 panels. Called once per epoch."""
     (a00, a01), (a10, a11), (a20, a21), (a30, a31) = axes
@@ -206,6 +216,9 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a11.plot(epochs_hist, aploss_hist, color="orange", lw=1.5, label="|actor loss|")
     a11.set_ylabel("|loss|")
     ax_lr = a11.twinx()
+    ax_lr.set_zorder(a11.get_zorder() - 1)           # keep primary axes grid on top
+    ax_lr.patch.set_visible(False)                   # hide twinx background
+    ax_lr.grid(False)                                # no twinx gridlines
     if lr_hist and min(lr_hist) > 0:
         ax_lr.semilogy(epochs_hist, lr_hist, color="#17becf", lw=1.2, ls="--", label="LR")
         ax_lr.axhline(y=1e-5, color="#17becf", ls=":", lw=0.8, alpha=0.6)
@@ -230,6 +243,9 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a21.tick_params(axis="y", labelcolor="#639922")
     a21.set_ylim(0.0, max(1.6, max(ent_hist) * 1.1) if ent_hist else 1.6)
     ax_el = a21.twinx()
+    ax_el.set_zorder(a21.get_zorder() - 1)           # keep primary axes grid on top
+    ax_el.patch.set_visible(False)                   # hide twinx background
+    ax_el.grid(False)                                # no twinx gridlines
     ax_el.plot(epochs_hist, eloss_hist, "#BA7517", lw=1.2, ls="--",
                label=f"entropy loss (×{ENTROPY_COEF})")
     ax_el.set_ylabel(f"−H·{ENTROPY_COEF}", color="#BA7517")
@@ -250,6 +266,7 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a30.set_title("Grad norm & adv_std")
     a30.set_xlabel("Epoch"); a30.legend(fontsize=8)
 
+    # Panel 8: Clip fraction + Lambda λ + μ (C1: added mu)
     a31.cla()
     a31.plot(epochs_hist, clip_hist, "#D85A30", lw=1.5, label="clip% (left)")
     a31.set_ylabel("clip fraction %", color="#D85A30")
@@ -258,15 +275,22 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
         a31.set_ylim(0.0, max(clip_hist) * 1.2 if max(clip_hist) > 0 else 0.1)
         a31.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
     ax_lam = a31.twinx()
+    ax_lam.set_zorder(a31.get_zorder() - 1)          # keep primary axes grid on top
+    ax_lam.patch.set_visible(False)                  # hide twinx background
+    ax_lam.grid(False)                               # no twinx gridlines
     ax_lam.plot(epochs_hist, lam_hist, "#534AB7", lw=1.2, ls="--", label="λ (right)")
-    ax_lam.set_ylabel("λ value", color="#534AB7")
+    # (C1) overlay μ on the same right axis as λ
+    if mu_hist:
+        ax_lam.plot(epochs_hist, mu_hist, "#993C1D", lw=1.2, ls=":", label="μ (right)")
+    ax_lam.set_ylabel("λ / μ value", color="#534AB7")
     ax_lam.tick_params(axis="y", labelcolor="#534AB7")
-    if lam_hist:
-        lam_min = min(lam_hist); lam_max = max(lam_hist)
+    if lam_hist or mu_hist:
+        all_vals = lam_hist + (mu_hist if mu_hist else [])
+        lam_min = min(all_vals); lam_max = max(all_vals)
         lam_pad = max((lam_max - lam_min) * 0.15, 0.1)
         ax_lam.set_ylim(lam_min - lam_pad, lam_max + lam_pad)
         ax_lam.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
-    a31.set_title("Clip fraction + Lambda λ (dual axis)")
+    a31.set_title("Clip fraction + λ + μ (dual axis)")  # (C1) updated title
     a31.set_xlabel("Epoch")
     lines1, labs1 = a31.get_legend_handles_labels()
     lines2, labs2 = ax_lam.get_legend_handles_labels()
@@ -344,10 +368,10 @@ def main():
     val_coords, val_demands, val_cap = load_dataset(VAL_PATH, device="cpu")
 
     ORTOOLS_REF, ORTOOLS_SOURCE = ensure_ortools_ref(
-        n=GRAPH_SIZE, val_path=VAL_PATH, n_instances=VAL_EVAL_SIZE,
+        n=GRAPH_SIZE, val_path=VAL_PATH, n_instances=ORTOOLS_EVAL_SIZE,
         coords_t=val_coords, demands_t=val_demands, capacity=val_cap,
         time_limit=ORTOOLS_TIME_LIMIT,
-        output_dir=OUTPUT_DIR,   # show current best model gap in banner
+        output_dir=OUTPUT_DIR,
     )
 
     existing = sorted([
@@ -366,8 +390,8 @@ def main():
         best_tour   = ckpt_data["metrics"].get("val_tour", float("inf"))
         best_epoch  = ckpt_data["iteration"]
 
-    # (P1) knn_k=10 passed to QAPPolicy
-    policy    = QAPPolicy(knn_k=KNN_K)
+    # (C1) mu_init=MU_INIT passed to QAPPolicy; (C2) context_dim=6 set internally
+    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT)
     env       = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
     generator = CVRPGenerator(GRAPH_SIZE, CAPACITY)
     n_params  = sum(p.numel() for p in policy.parameters())
@@ -389,49 +413,53 @@ def main():
         val_cap,
     )
 
-    print("=" * 72)
-    print(f"  QAP-DRL Training — CVRP-{GRAPH_SIZE}  [v8 — Phase 1]")
-    print("=" * 72)
+    print("=" * 80)
+    print(f"  QAP-DRL Training — CVRP-{GRAPH_SIZE}  [v9 — Phase 1b + Changes 1+2]")
+    print("=" * 80)
     print(f"  Graph size     : {GRAPH_SIZE}")
     print(f"  Capacity       : {CAPACITY}")
     print(f"  Val instances  : {VAL_EVAL_SIZE}")
     print(f"  Batch size     : {BATCH_SIZE}")
     print(f"  Epochs         : {N_EPOCHS}")
-    print(f"  Epoch size     : {EPOCH_SIZE:,}  ({BATCHES_PER_EPOCH} batches/epoch)  [P1: 128K]")
+    print(f"  Epoch size     : {EPOCH_SIZE:,}  ({BATCHES_PER_EPOCH} batches/epoch)")
     print(f"  LR             : {LR} (cosine → 1e-5 over {TOTAL_OPT_STEPS:,} steps)")
-    print(f"  Entropy coef   : {ENTROPY_COEF}  [P1: 0.05]")
-    print(f"  kNN k          : {KNN_K}  [P1: k=10]")
-    print(f"  Eval aug       : ×{AUG_SAMPLES} stochastic samples, take best  [P1]")
+    print(f"  Entropy coef   : {ENTROPY_COEF}")
+    print(f"  kNN k          : {KNN_K}")
+    print(f"  Eval aug       : ×{AUG_SAMPLES} stochastic samples, take best")
     print(f"  Parameters     : {n_params}")
+    print(f"  μ init         : {MU_INIT}  [C1: distance penalty, learnable]")
+    print(f"  ctx dim        : 6  [C2: +x_curr,y_curr in context vector]")
+    print(f"  Scoring        : q·ψ'j + λ·E_kNN(j) − μ·dist(vt,vj)  [C1+C2]")
     print(f"  Benchmark      : {ORTOOLS_REF:.4f}  ({ORTOOLS_SOURCE})")
     if device.type == "cuda":
         gpu = torch.cuda.get_device_name(0); vram = torch.cuda.get_device_properties(0).total_memory/1e9
         print(f"  Device         : {device}  ({gpu}, {vram:.1f} GB)")
     else:
         print(f"  Device         : {device}")
-    print("=" * 72)
+    print("=" * 80)
     print(f"  {'RESUMING from: '+existing[-1] if is_resume else 'Fresh start: epoch 1 of '+str(N_EPOCHS)}")
-    print("=" * 72)
+    print("=" * 80)
 
     log_path = os.path.join(OUTPUT_DIR, "train_log.jsonl")
     fig_live, axes = plt.subplots(4, 2, figsize=(14, 16))
-    fig_live.suptitle(f"QAP-DRL Training — CVRP-{GRAPH_SIZE} [Phase 1]", fontsize=14)
+    fig_live.suptitle(f"QAP-DRL Training — CVRP-{GRAPH_SIZE} [Phase 1b + C1+C2]", fontsize=14)
 
     if is_resume:
         (epochs_hist, tour_hist, reward_hist, ploss_hist, aploss_hist,
          lr_hist, vloss_hist, ent_hist, eloss_hist,
-         gnorm_hist, adv_hist, clip_hist, lam_hist) = _load_chart_history(log_path)
+         gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist) = _load_chart_history(log_path)
     else:
         epochs_hist = []; tour_hist  = []; reward_hist = []
         ploss_hist  = []; aploss_hist= []; lr_hist     = []
         vloss_hist  = []; ent_hist   = []; eloss_hist  = []
-        gnorm_hist  = []; adv_hist   = []; clip_hist   = []; lam_hist = []
+        gnorm_hist  = []; adv_hist   = []; clip_hist   = []
+        lam_hist    = []; mu_hist    = []  # (C1)
 
     header = (
         f"{'Ep':>4} | {'val_tour':>8} | {'vs ORT':>7} | "
         f"{'actor_L':>8} | {'critic_L':>8} | {'entropy':>7} | "
         f"{'grad':>6} | {'clip%':>5} | {'adv_std':>7} | "
-        f"{'λ':>6} | {'feas%':>5} | {'t(s)':>5}"
+        f"{'λ':>6} | {'μ':>6} | {'feas%':>5} | {'t(s)':>5}"
     )
     tqdm.write(f"\n{header}")
     tqdm.write("-" * len(header))
@@ -459,6 +487,7 @@ def main():
                     critic = f"{losses['value_loss']:.3f}",
                     ent    = f"{losses['entropy']:.3f}",
                     grad   = f"{losses['grad_norm']:.3f}",
+                    mu     = f"{losses['mu_val']:.4f}",   # (C1)
                 )
 
         avg_ploss   = _avg(losses_list, "policy_loss")
@@ -472,12 +501,12 @@ def main():
         avg_train_t = _avg(losses_list, "train_tour")
         avg_greedy  = _avg(losses_list, "greedy_tour")
         last_lambda = losses_list[-1]["lambda_val"]
+        last_mu     = losses_list[-1]["mu_val"]        # (C1)
         last_lr     = losses_list[-1]["lr"]
         avg_feas    = sum(feas_list) / len(feas_list)
         elapsed     = time.time() - t0
         vram        = torch.cuda.memory_allocated()/1e6 if torch.cuda.is_available() else 0.0
 
-        # (P1) augmented evaluation — sample ×AUG_SAMPLES, return best mean
         val_tour    = evaluate_augmented(trainer.policy, val_instances, device,
                                          n_samples=AUG_SAMPLES)
         val_gap_ort = 100.0 * (val_tour - ORTOOLS_REF) / ORTOOLS_REF
@@ -498,6 +527,7 @@ def main():
             "ratio_mean":      avg_ratio,
             "adv_std":         avg_adv_std,
             "lambda_val":      last_lambda,
+            "mu_val":          last_mu,        # (C1)
             "lr":              last_lr,
             "feasibility":     avg_feas,
             "vram_mb":         vram,
@@ -523,7 +553,7 @@ def main():
             f"{epoch:4d} | {val_tour:8.4f} | {val_gap_ort:+6.1f}% | "
             f"{avg_ploss:8.3e} | {avg_vloss:8.3f} | {avg_ent:7.4f} | "
             f"{avg_gnorm:6.3f} | {avg_clip*100:4.1f}% | {avg_adv_std:7.4f} | "
-            f"{last_lambda:6.4f} | {avg_feas*100:4.1f}% | {elapsed:4.0f}s{marker}"
+            f"{last_lambda:6.4f} | {last_mu:6.4f} | {avg_feas*100:4.1f}% | {elapsed:4.0f}s{marker}"
         )
 
         epochs_hist.append(epoch);  tour_hist.append(val_tour)
@@ -535,11 +565,12 @@ def main():
         gnorm_hist.append(avg_gnorm);  adv_hist.append(avg_adv_std)
         clip_hist.append(avg_clip * 100.0)
         lam_hist.append(last_lambda)
+        mu_hist.append(last_mu)     # (C1)
 
         _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
                      ploss_hist, aploss_hist, lr_hist,
                      vloss_hist, ent_hist, eloss_hist,
-                     gnorm_hist, adv_hist, clip_hist, lam_hist,
+                     gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist,
                      ORTOOLS_REF)
 
         fig_live.tight_layout(rect=[0, 0, 1, 0.97])
@@ -549,7 +580,7 @@ def main():
     trainer.logger.close()
 
     # ── Post-training visualisation ──────────────────────────────────────
-    best_policy = QAPPolicy(knn_k=KNN_K)
+    best_policy = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT)
     best_policy.load_state_dict(
         torch.load(os.path.join(OUTPUT_DIR, "best_model.pt"), map_location=device)
     )
@@ -574,6 +605,40 @@ def main():
         f"Best Route — CVRP-{GRAPH_SIZE} | Tour: {dists[best_i].item():.2f}",
         os.path.join(OUTPUT_DIR, "best_route.png"),
     )
+
+    # ── OR-Tools route on the SAME instance as the best model route ──────
+    # Uses the identical instance (coords, demands) so the two maps are
+    # directly comparable: same customers, same depot, same capacity.
+    if ORTOOLS_OK:
+        import numpy as _np
+        coords_i  = bc[best_i].cpu().numpy()      # [N+1, 2]
+        demands_i = bd[best_i].cpu().numpy()      # [N+1]
+        print(f"  Running OR-Tools on instance {best_i} (same as best route)...")
+        ort_len, ort_routes = solve_one_with_routes(
+            coords_i, demands_i, CAPACITY, ORTOOLS_TIME_LIMIT
+        )
+        if ort_routes:
+            # Flatten routes into actions_list format: depot=0 between routes
+            ort_actions = []
+            for route in ort_routes:
+                ort_actions.extend(route)
+                ort_actions.append(0)              # return to depot
+            if ort_actions and ort_actions[-1] == 0:
+                ort_actions = ort_actions[:-1]     # trim trailing depot
+            plot_route_map(
+                coords_i, ort_actions,
+                GRAPH_SIZE, ort_len,
+                f"OR-Tools Route — CVRP-{GRAPH_SIZE} | Tour: {ort_len:.2f}",
+                os.path.join(OUTPUT_DIR, "ortools_route.png"),
+            )
+            gap_this = 100.0 * (dists[best_i].item() - ort_len) / ort_len
+            print(f"  OR-Tools route saved: tour={ort_len:.4f}  "
+                  f"model={dists[best_i].item():.4f}  "
+                  f"gap={gap_this:+.1f}% on this instance")
+        else:
+            print("  OR-Tools could not solve instance — no route map generated")
+    else:
+        print("  OR-Tools not available — skipping OR-Tools route map")
     plot_cluster_map(
         bc[best_i].cpu().numpy(), actions[best_i].cpu().tolist(),
         bd[best_i].cpu().numpy(), CAPACITY, GRAPH_SIZE,
@@ -582,15 +647,17 @@ def main():
     )
 
     print()
-    print("=" * 72)
-    print(f"  Training Complete — CVRP-{GRAPH_SIZE} [Phase 1]")
-    print("=" * 72)
+    print("=" * 80)
+    print(f"  Training Complete — CVRP-{GRAPH_SIZE} [Phase 1b + Changes 1+2]")
+    print("=" * 80)
     print(f"  Best epoch       : {best_epoch}")
     print(f"  Best tour length : {best_tour:.4f}  (augmented ×{AUG_SAMPLES})")
     print(f"  OR-Tools ref     : {ORTOOLS_REF:.4f}  ({ORTOOLS_SOURCE})")
     print(f"  Gap vs OR-Tools  : {100*(best_tour-ORTOOLS_REF)/ORTOOLS_REF:+.2f}%")
     print(f"  Log              : {os.path.join(OUTPUT_DIR, 'train_log.jsonl')}")
-    print("=" * 72)
+    print(f"  Best route map   : {os.path.join(OUTPUT_DIR, 'best_route.png')}")
+    print(f"  OR-Tools map     : {os.path.join(OUTPUT_DIR, 'ortools_route.png')}  (same instance)")
+    print("=" * 80)
     plt.close("all")
 
 

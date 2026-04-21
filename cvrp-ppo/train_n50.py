@@ -47,6 +47,7 @@ from training.evaluate import evaluate, evaluate_augmented
 from utils.seed import set_seed
 from utils.data_generator import generate_instances, load_dataset
 from utils.ortools_refs import ensure_ortools_ref
+from utils.ortools_solver import solve_one_with_routes, ORTOOLS_OK
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Settings  — Phase 1 values marked with (P1)
@@ -68,7 +69,8 @@ OUTPUT_DIR           = os.path.join(SCRIPT_DIR, "outputs", "n50")
 EPOCH_DIR            = os.path.join(OUTPUT_DIR, "epochs")
 ARCHIVE_DIR          = os.path.join(OUTPUT_DIR, "Archive")
 VAL_PATH             = os.path.join(SCRIPT_DIR, "datasets", "val_n50.pkl")
-VAL_EVAL_SIZE        = 10_000         # key paper standard: 10K instances for reliable val_tour
+VAL_EVAL_SIZE        = 10_000         # model validation: 10K instances (key paper standard, fast neural eval)
+ORTOOLS_EVAL_SIZE    = 1_000           # OR-Tools ref: 1K instances only (2s/inst × 1K = ~33 min)
 ORTOOLS_TIME_LIMIT   = 2.0
 
 
@@ -180,6 +182,9 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a11.plot(epochs_hist, aploss_hist, color="orange", lw=1.5, label="|actor loss|")
     a11.set_ylabel("|loss|")
     ax_lr = a11.twinx()
+    ax_lr.set_zorder(a11.get_zorder() - 1)
+    ax_lr.patch.set_visible(False)
+    ax_lr.grid(False)
     if lr_hist and min(lr_hist) > 0:
         ax_lr.semilogy(epochs_hist, lr_hist, color="#17becf", lw=1.2, ls="--", label="LR")
         ax_lr.axhline(y=1e-5, color="#17becf", ls=":", lw=0.8, alpha=0.6)
@@ -199,6 +204,9 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
     a21.set_ylabel("entropy", color="#639922"); a21.tick_params(axis="y", labelcolor="#639922")
     a21.set_ylim(0.0, max(1.6, max(ent_hist) * 1.1) if ent_hist else 1.6)
     ax_el = a21.twinx()
+    ax_el.set_zorder(a21.get_zorder() - 1)
+    ax_el.patch.set_visible(False)
+    ax_el.grid(False)
     ax_el.plot(epochs_hist, eloss_hist, "#BA7517", lw=1.2, ls="--", label=f"entropy loss (×{ENTROPY_COEF})")
     ax_el.set_ylabel(f"−H·{ENTROPY_COEF}", color="#BA7517"); ax_el.tick_params(axis="y", labelcolor="#BA7517")
     if eloss_hist:
@@ -221,6 +229,9 @@ def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
         a31.set_ylim(0.0, max(clip_hist) * 1.2 if max(clip_hist) > 0 else 0.1)
         a31.yaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=5, prune='both'))
     ax_lam = a31.twinx()
+    ax_lam.set_zorder(a31.get_zorder() - 1)
+    ax_lam.patch.set_visible(False)
+    ax_lam.grid(False)
     ax_lam.plot(epochs_hist, lam_hist, "#534AB7", lw=1.2, ls="--", label="λ (right)")
     ax_lam.set_ylabel("λ value", color="#534AB7"); ax_lam.tick_params(axis="y", labelcolor="#534AB7")
     if lam_hist:
@@ -291,7 +302,7 @@ def main():
 
     val_coords,val_demands,val_cap = load_dataset(VAL_PATH, device="cpu")
     ORTOOLS_REF,ORTOOLS_SOURCE = ensure_ortools_ref(
-        n=GRAPH_SIZE,val_path=VAL_PATH,n_instances=VAL_EVAL_SIZE,
+        n=GRAPH_SIZE,val_path=VAL_PATH,n_instances=ORTOOLS_EVAL_SIZE,
         coords_t=val_coords,demands_t=val_demands,capacity=val_cap,
         time_limit=ORTOOLS_TIME_LIMIT,
         output_dir=OUTPUT_DIR)
@@ -418,6 +429,23 @@ def main():
     plot_route_map(bc[best_i].cpu().numpy(),actions[best_i].cpu().tolist(),GRAPH_SIZE,
                    dists[best_i].item(),f"Best Route — CVRP-{GRAPH_SIZE} | Tour: {dists[best_i].item():.2f}",
                    os.path.join(OUTPUT_DIR,"best_route.png"))
+
+    # OR-Tools route on the SAME instance for direct comparison
+    if ORTOOLS_OK:
+        coords_i  = bc[best_i].cpu().numpy()
+        demands_i = bd[best_i].cpu().numpy()
+        print(f"  Running OR-Tools on instance {best_i} (same as best route)...")
+        ort_len, ort_routes = solve_one_with_routes(coords_i, demands_i, CAPACITY, ORTOOLS_TIME_LIMIT)
+        if ort_routes:
+            ort_actions = []
+            for route in ort_routes:
+                ort_actions.extend(route); ort_actions.append(0)
+            if ort_actions and ort_actions[-1] == 0: ort_actions = ort_actions[:-1]
+            plot_route_map(coords_i, ort_actions, GRAPH_SIZE, ort_len,
+                           f"OR-Tools Route — CVRP-{GRAPH_SIZE} | Tour: {ort_len:.2f}",
+                           os.path.join(OUTPUT_DIR, "ortools_route.png"))
+            print(f"  OR-Tools route saved: tour={ort_len:.4f}  model={dists[best_i].item():.4f}  "
+                  f"gap={100*(dists[best_i].item()-ort_len)/ort_len:+.1f}% on this instance")
     plot_cluster_map(bc[best_i].cpu().numpy(),actions[best_i].cpu().tolist(),
                      bd[best_i].cpu().numpy(),CAPACITY,GRAPH_SIZE,
                      f"Cluster Map — CVRP-{GRAPH_SIZE}",os.path.join(OUTPUT_DIR,"cluster_map.png"))

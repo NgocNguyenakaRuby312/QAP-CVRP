@@ -5,14 +5,23 @@ Step 2 — Feature Construction.
 
 Builds the 5-dimensional node feature vector for every node (depot + customers):
 
-    xᵢ = [dᵢ/C,  ‖i−depot‖,  xᵢ,  yᵢ,  atan2(Δy,Δx)/π]  ∈ ℝ⁵     # Eq §3.X.3
-          [0]       [1]         [2]   [3]        [4]
+    xᵢ = [dᵢ/C, ‖i−depot‖, xᵢ, yᵢ, atan2(Δy,Δx)/π]  ∈ ℝ⁵              # Eq §3.X.3
 
 Feature [0]: demand normalised by vehicle capacity — depot = 0
 Feature [1]: Euclidean distance from node to depot (raw, not normalised)
 Feature [2]: raw x-coordinate (already in [0, 1] from data generation)
 Feature [3]: raw y-coordinate (already in [0, 1] from data generation)
 Feature [4]: polar angle relative to depot, divided by π → ∈ [−1, 1]
+
+These are STATIC features — computed ONCE before the decoding loop.
+The encoder produces a fixed graph embedding that does NOT change during decoding.
+This is consistent with AM, POMO, and all standard constructive DRL solvers.
+
+Change 3 REVERTED (April 2026):
+    Dynamic 6th feature dist(i,vₜ) removed. Per-step re-encoding broke the
+    static embedding contract, caused 36.7% gap (vs 17% before). The decoder's
+    context query (Change 2: x_curr, y_curr) and distance penalty (Change 1:
+    −μ·dist) already provide spatial awareness without corrupting the encoder.
 """
 
 import math
@@ -60,7 +69,6 @@ class FeatureBuilder(nn.Module):
 
         # ── Feature [1]: ‖i − depot‖ (raw distance) ─────────────────  # Eq: x_i[1]
         feat_dist = diff.norm(dim=-1)                                  # [B, N+1]
-        # Depot row: diff[:,0,:] = [0,0] → feat_dist[:,0] = 0 (correct: self-distance)
 
         # ── Feature [2]: xᵢ (raw coordinate) ────────────────────────  # Eq: x_i[2]
         feat_x = coords[:, :, 0]                                      # [B, N+1]
@@ -69,10 +77,7 @@ class FeatureBuilder(nn.Module):
         feat_y = coords[:, :, 1]                                      # [B, N+1]
 
         # ── Feature [4]: atan2(Δy, Δx) / π ──────────────────────────  # Eq: x_i[4]
-        # Depot row: atan2(0, 0) → PyTorch returns 0.0 (C standard).
-        # This is acceptable: the depot has no meaningful polar angle relative
-        # to itself, and feat_dist[:,0] = 0 already encodes "this IS the depot".
-        feat_angle = torch.atan2(diff[:, :, 1], diff[:, :, 0]) / math.pi  # [B, N+1] ∈ [-1, 1]
+        feat_angle = torch.atan2(diff[:, :, 1], diff[:, :, 0]) / math.pi  # [B, N+1]
 
         features = torch.stack(
             [feat_demand, feat_dist, feat_x, feat_y, feat_angle], dim=-1
