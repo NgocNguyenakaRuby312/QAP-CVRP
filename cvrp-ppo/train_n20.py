@@ -64,10 +64,11 @@ BATCH_SIZE           = 512             # (P1b) was 256 — larger batch → wide
 N_EPOCHS             = 200
 EPOCH_SIZE           = 128_000          # (P1) was 51_200 — thesis spec
 LR                   = 1e-4
-ENTROPY_COEF         = 0.01             # (P1b) was 0.05 — adv collapse at 0.05
+ENTROPY_COEF         = 0.03             # (P2) was 0.01 — prevent premature entropy collapse
 VALUE_COEF           = 0.5
 KNN_K                = 10              # (P1) covers 50% of N=20 graph
 MU_INIT              = 0.5             # (C1) distance penalty scalar, learnable
+AMP_DIM              = 4               # (P2) amplitude dimension: 4D hypersphere S³
 SEED                 = 1234
 BATCHES_PER_EPOCH    = EPOCH_SIZE // BATCH_SIZE          # 250
 TOTAL_OPT_STEPS      = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8   # 1,200,000
@@ -390,8 +391,8 @@ def main():
         best_tour   = ckpt_data["metrics"].get("val_tour", float("inf"))
         best_epoch  = ckpt_data["iteration"]
 
-    # (C1) mu_init=MU_INIT passed to QAPPolicy; (C2) context_dim=6 set internally
-    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT)
+    # (P2) amp_dim=AMP_DIM; (C1) mu_init=MU_INIT; context_dim computed internally
+    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT, amp_dim=AMP_DIM)
     env       = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
     generator = CVRPGenerator(GRAPH_SIZE, CAPACITY)
     n_params  = sum(p.numel() for p in policy.parameters())

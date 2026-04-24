@@ -53,7 +53,7 @@ class BaselineEncoder(nn.Module):
     Parameter count: 5×2 + 2 = 12
     """
 
-    def __init__(self, input_dim: int = 5, output_dim: int = 2):
+    def __init__(self, input_dim: int = 5, output_dim: int = 4):
         super().__init__()
         self.proj = nn.Linear(input_dim, output_dim)  # 12 params
 
@@ -76,7 +76,7 @@ class FullBaselineEncoder(nn.Module):
     Used by QAPPolicy when encoder_type="baseline".
     """
 
-    def __init__(self, input_dim: int = 5, output_dim: int = 2,
+    def __init__(self, input_dim: int = 5, output_dim: int = 4,
                  knn_k: int = 5):
         super().__init__()
         self.feature_builder   = FeatureBuilder()

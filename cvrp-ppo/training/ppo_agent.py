@@ -93,7 +93,13 @@ class PPOTrainer:
         self.device        = device
         self.log_dir       = log_dir
 
-        self.optimizer = Adam(policy.parameters(), lr=lr)
+        # Fix 3: separate param group — weight_decay on μ to resist explosion
+        mu_params  = [p for n, p in policy.named_parameters() if 'mu_param' in n]
+        base_params = [p for n, p in policy.named_parameters() if 'mu_param' not in n]
+        self.optimizer = Adam([
+            {'params': base_params, 'lr': lr, 'weight_decay': 0.0},
+            {'params': mu_params,   'lr': lr, 'weight_decay': 1e-2},
+        ], lr=lr)
         self.scheduler = CosineAnnealingLR(
             self.optimizer, T_max=total_steps, eta_min=1e-5  # v4: was 1e-6
         )
@@ -131,7 +137,7 @@ class PPOTrainer:
         with torch.no_grad():
             state_sample = self.env.reset(instance)
             # Encode ONCE — psi_prime fixed for all decode steps
-            psi_prime, _, knn_indices = self.policy.encoder(state_sample)  # [B,N+1,2]
+            psi_prime, _, knn_indices = self.policy.encoder(state_sample)  # [B,N+1,D]
             self._last_knn = knn_indices
 
             # ── Pass 1: Sampled rollout ────────────────────────────────
@@ -227,7 +233,7 @@ class PPOTrainer:
                 }
                 # Static encode: feature_builder returns [mb, N+1, 5]
                 features_mb  = self.policy.encoder.feature_builder(init_instance)
-                psi_prime_mb = self.policy.encoder.qap_encoder(features_mb)  # [mb,N+1,2]
+                psi_prime_mb = self.policy.encoder.qap_encoder(features_mb)  # [mb,N+1,D]
                 knn_mb       = self._last_knn[idx]                            # [mb,N+1,k]
 
                 lp_new, entropy = self.policy.evaluate_actions(

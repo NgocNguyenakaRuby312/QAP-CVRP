@@ -31,7 +31,7 @@ class QAPDecoder(nn.Module):
         mu_init:      initial distance penalty weight μ (default 0.5)
     """
 
-    def __init__(self, context_dim: int = 6, embed_dim: int = 2,
+    def __init__(self, context_dim: int = 8, embed_dim: int = 4,
                  lambda_init: float = 0.1, mu_init: float = 0.5):
         super().__init__()
         self.context_query = ContextAndQuery(context_dim, embed_dim)
@@ -42,7 +42,7 @@ class QAPDecoder(nn.Module):
     def forward(
         self,
         state:       dict,
-        psi_prime:   torch.Tensor,    # [B, N+1, 2]  static, fixed for all steps
+        psi_prime:   torch.Tensor,    # [B, N+1, D]  static, fixed for all steps
         knn_indices: torch.Tensor,
         step:        int,
         n_customers: int,
@@ -72,7 +72,7 @@ class QAPDecoder(nn.Module):
 
     def rollout(
         self,
-        psi_prime:   torch.Tensor,    # [B, N+1, 2]  fixed for all steps
+        psi_prime:   torch.Tensor,    # [B, N+1, D]  fixed for all steps
         env_state:   dict,
         knn_indices: torch.Tensor,    # [B, N+1, k]  precomputed — does not change
         env,
@@ -85,7 +85,7 @@ class QAPDecoder(nn.Module):
         No per-step re-encoding.
 
         Args:
-            psi_prime:   [B, N+1, 2]  encoder output (fixed)
+            psi_prime:   [B, N+1, D]  encoder output (fixed)
             env_state:   dict         initial environment state
             knn_indices: [B, N+1, k]  precomputed spatial kNN
             env:         CVRPEnv      dict-based step interface

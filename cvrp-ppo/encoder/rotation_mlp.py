@@ -1,12 +1,15 @@
 """
 encoder/rotation_mlp.py
 ========================
-MLP that predicts per-node rotation angle θᵢ.
+MLP that predicts per-node rotation angles.
 
-    θᵢ = MLP(xᵢ)      MLP: 5 → 16 → 1, tanh activation               # Eq §3.X.5
+Phase 2 (4D):
+    θᵢ = MLP(xᵢ)   MLP: 5 → 16 → 6 (one angle per Givens plane in SO(4))
+    Parameters: 5×16 + 16 + 16×6 + 6 = 118
 
-Architecture: Linear(5→16) → Tanh → Linear(16→1)
-Parameters:   5×16 + 16 + 16×1 + 1 = 113
+Phase 1 (2D, backward compat):
+    θᵢ = MLP(xᵢ)   MLP: 5 → 16 → 1
+    Parameters: 5×16 + 16 + 16×1 + 1 = 113
 """
 
 import torch
@@ -15,19 +18,21 @@ import torch.nn as nn
 
 class RotationMLP(nn.Module):
     """
-    MLP: ℝ⁵ → ℝ¹  predicts rotation angle θᵢ.
+    MLP: ℝ⁵ → ℝⁿ  predicts rotation angles.
 
     Args:
         input_dim:  feature dimension (default 5)
         hidden_dim: hidden layer width (default 16)
+        n_angles:   number of output angles (1 for 2D, 6 for 4D SO(4))
     """
 
-    def __init__(self, input_dim: int = 5, hidden_dim: int = 16):
+    def __init__(self, input_dim: int = 5, hidden_dim: int = 16, n_angles: int = 6):
         super().__init__()
+        self.n_angles = n_angles
         self.net = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),                          # 5 → 16
             nn.Tanh(),                                                 # tanh activation
-            nn.Linear(hidden_dim, 1),                                  # 16 → 1
+            nn.Linear(hidden_dim, n_angles),                           # 16 → n_angles
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
@@ -36,8 +41,10 @@ class RotationMLP(nn.Module):
             features: [B, N+1, 5]
 
         Returns:
-            theta: [B, N+1]  rotation angles
+            theta: [B, N+1] if n_angles==1, else [B, N+1, n_angles]
         """
-        theta = self.net(features).squeeze(-1)                         # [B, N+1]
-        theta = torch.clamp(theta, -10, 10)                            # P5: prevent NaN
-        return theta
+        out = self.net(features)                                       # [B, N+1, n_angles]
+        out = torch.clamp(out, -10, 10)                                # P5: prevent NaN
+        if self.n_angles == 1:
+            return out.squeeze(-1)                                     # [B, N+1]  backward compat
+        return out                                                     # [B, N+1, 6]
