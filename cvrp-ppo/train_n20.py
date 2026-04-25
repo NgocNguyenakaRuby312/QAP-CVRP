@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 """
+THIS IS THE BASELINE TRAINING SCRIPT for CVRP-20.  It implements the core QAP-DRL training loop with PPO, and serves as the foundation for all subsequent experiments and ablations in the thesis.
 train_n20.py — Train QAP-DRL on CVRP-20.
 
 Fully self-contained.  Just run:
