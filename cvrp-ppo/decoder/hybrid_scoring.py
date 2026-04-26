@@ -74,8 +74,8 @@ class HybridScoring(nn.Module):
             all_coords - current_coords.unsqueeze(1), p=2, dim=-1      # [B, N+1]
         )
 
-        mu_eff  = torch.clamp(self.mu_param,     min=0.0, max=10.0)
-        lam_eff = torch.clamp(self.lambda_param, min=-0.5, max=3.0)
+        mu_eff  = torch.clamp(self.mu_param,     min=0.0, max=20.0)    # raised from 10→20
+        lam_eff = torch.clamp(self.lambda_param, min=-2.0, max=3.0)    # Fix 2: floor -0.5→-2.0
 
         scores = (
             context_scores

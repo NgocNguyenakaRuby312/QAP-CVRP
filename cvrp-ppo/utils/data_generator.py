@@ -5,7 +5,7 @@ from typing import Optional, Tuple
 
 
 # Capacity matched to graph size — Kool et al. 2019 protocol (§6)
-CAPACITY_MAP = {10: 20, 20: 30, 50: 40, 100: 50}
+CAPACITY_MAP = {10: 20, 20: 30, 50: 40, 100: 50, 200: 50}
 
 
 def get_capacity(graph_size: int) -> int:

@@ -183,8 +183,8 @@ class QAPPolicy(nn.Module):
         )
 
         # ── Clamp learnable scalars (must match hybrid_scoring.py) ───
-        mu_eff  = torch.clamp(self.decoder.hybrid.mu_param,     min=0.0, max=10.0)
-        lam_eff = torch.clamp(self.decoder.hybrid.lambda_param, min=-0.5, max=3.0)
+        mu_eff  = torch.clamp(self.decoder.hybrid.mu_param,     min=0.0, max=20.0)
+        lam_eff = torch.clamp(self.decoder.hybrid.lambda_param, min=-2.0, max=3.0)
 
         # ── Full 3-term score ────────────────────────────────────────
         scores = (

@@ -392,8 +392,8 @@ def main():
         best_tour   = ckpt_data["metrics"].get("val_tour", float("inf"))
         best_epoch  = ckpt_data["iteration"]
 
-    # (P2) amp_dim=AMP_DIM; (C1) mu_init=MU_INIT; context_dim computed internally
-    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT, amp_dim=AMP_DIM)
+    # (P2) amp_dim=AMP_DIM; (C1) mu_init=MU_INIT; Fix 4: hidden_dim=32
+    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT, amp_dim=AMP_DIM, hidden_dim=32)
     env       = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
     generator = CVRPGenerator(GRAPH_SIZE, CAPACITY)
     n_params  = sum(p.numel() for p in policy.parameters())

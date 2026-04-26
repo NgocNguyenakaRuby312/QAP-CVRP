@@ -1,15 +1,21 @@
 #!/usr/bin/env python
-"""test_n50.py — Evaluate trained QAP-DRL on CVRP-50 test set."""
+"""
+test_n50.py — Evaluate trained QAP-DRL on CVRP-50 test set.
+
+Identical structure to test_n20.py with N=50 settings.
+Run after train_n50.py completes:  python test_n50.py
+"""
 
 import os, sys, time, json
 import torch
+import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, SCRIPT_DIR)
 
 from tqdm import tqdm
 import matplotlib
-matplotlib.use("TkAgg")
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 try:
     plt.style.use("seaborn-v0_8-whitegrid")
@@ -21,25 +27,33 @@ except OSError:
 
 from models.qap_policy import QAPPolicy
 from environment.cvrp_env import CVRPEnv
+from training.evaluate import evaluate_augmented
 from utils.data_generator import load_dataset
+from utils.ortools_solver import ORTOOLS_OK
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Settings
+# Settings — must match train_n50.py
 # ═══════════════════════════════════════════════════════════════════════════
 GRAPH_SIZE      = 50
 CAPACITY        = 40
-LKH3_REF        = 10.38
+AMP_DIM         = 4
+HIDDEN_DIM      = 32
+KNN_K           = 15
+
 TEST_PATH       = os.path.join(SCRIPT_DIR, "datasets", "test_n50.pkl")
 MODEL_PATH      = os.path.join(SCRIPT_DIR, "outputs", "n50", "best_model.pt")
 OUTPUT_DIR      = os.path.join(SCRIPT_DIR, "outputs", "n50")
-EVAL_BATCH_SIZE = 256
+
+EVAL_BATCH_SIZE = 128              # smaller than N=20 (256) — VRAM
+AUG_SAMPLES     = 8
+ORTOOLS_TEST_N  = 100
+ORTOOLS_TIME    = 5.0              # N=50 needs more time per instance
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Helpers
+# Helpers (same as test_n20.py)
 # ═══════════════════════════════════════════════════════════════════════════
 def check_feasibility(demands, capacity, actions):
-    """Vectorised feasibility check. Returns number of feasible routes."""
     B, T = actions.shape
     used = torch.zeros(B, device=actions.device)
     violated = torch.zeros(B, dtype=torch.bool, device=actions.device)
@@ -52,55 +66,50 @@ def check_feasibility(demands, capacity, actions):
     return (~violated).sum().item()
 
 
-def plot_route_map(coords_np, actions_list, graph_size, tour_length,
-                   title, save_path):
-    """Plot a single CVRP solution with coloured vehicle routes and arrows."""
-    COLORS = ["#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd", "#8c564b",
-              "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
-
-    routes = []
-    cur = []
+def plot_route_map(coords_np, actions_list, graph_size, tour_length, title, save_path):
+    COLORS = ["#1f77b4","#ff7f0e","#2ca02c","#9467bd","#8c564b","#e377c2","#7f7f7f","#bcbd22","#17becf"]
+    routes, cur = [], []
     for node in actions_list:
         if node == 0:
-            if cur:
-                routes.append(cur)
-            cur = []
-        else:
-            cur.append(node)
-    if cur:
-        routes.append(cur)
-
-    fig, ax = plt.subplots(figsize=(8, 8))
-    fig.patch.set_facecolor("white")
-
-    ax.plot(coords_np[0, 0], coords_np[0, 1], "r*",
-            markersize=20, label="Depot", zorder=5)
-
-    for i in range(1, graph_size + 1):
-        ax.plot(coords_np[i, 0], coords_np[i, 1], "o",
-                color="#4a90d9", markersize=5, zorder=4)
-        ax.annotate(str(i), (coords_np[i, 0], coords_np[i, 1]),
-                    textcoords="offset points", xytext=(3, 3), fontsize=7)
-
+            if cur: routes.append(cur); cur = []
+        else: cur.append(node)
+    if cur: routes.append(cur)
+    fig, ax = plt.subplots(figsize=(10, 10)); fig.patch.set_facecolor("white")
+    ax.plot(coords_np[0,0], coords_np[0,1], "r*", markersize=20, label="Depot", zorder=5)
+    for i in range(1, graph_size+1):
+        ax.plot(coords_np[i,0], coords_np[i,1], "o", color="#4a90d9", markersize=4, zorder=4)
+        ax.annotate(str(i), (coords_np[i,0], coords_np[i,1]),
+                    textcoords="offset points", xytext=(3,3), fontsize=6)
     for r_idx, route in enumerate(routes):
-        color = COLORS[r_idx % len(COLORS)]
-        path = [0] + route + [0]
-        for k in range(len(path) - 1):
-            x0, y0 = coords_np[path[k]]
-            x1, y1 = coords_np[path[k + 1]]
-            ax.annotate("", xy=(x1, y1), xytext=(x0, y0),
-                        arrowprops=dict(arrowstyle="->", color=color, lw=1.5))
-        ax.plot([], [], color=color, lw=1.5, label=f"Route {r_idx + 1}")
-
-    ax.set_title(title, fontsize=14)
-    ax.legend(loc="upper right", fontsize=9)
-    ax.set_xlabel("x", fontsize=12)
-    ax.set_ylabel("y", fontsize=12)
-    ax.set_aspect("equal")
-
-    fig.savefig(save_path, dpi=150, bbox_inches="tight")
+        color = COLORS[r_idx % len(COLORS)]; path = [0]+route+[0]
+        for k in range(len(path)-1):
+            x0,y0 = coords_np[path[k]]; x1,y1 = coords_np[path[k+1]]
+            ax.annotate("", xy=(x1,y1), xytext=(x0,y0),
+                        arrowprops=dict(arrowstyle="->", color=color, lw=1.2))
+        ax.plot([],[],color=color,lw=1.5,label=f"Route {r_idx+1}")
+    ax.set_title(title, fontsize=14); ax.legend(loc="upper right", fontsize=8)
+    ax.set_xlabel("x"); ax.set_ylabel("y"); ax.set_aspect("equal")
+    fig.savefig(save_path, dpi=150, bbox_inches="tight"); plt.close(fig)
     print(f"  Saved: {save_path}")
-    return fig
+
+
+def run_ortools_on_test(coords, demands, capacity, n_instances, time_limit):
+    if not ORTOOLS_OK:
+        print("  OR-Tools not available, skipping.")
+        return None
+    from utils.ortools_solver import solve_one_with_routes
+    results = []
+    print(f"\n  Running OR-Tools on {n_instances} test instances (time_limit={time_limit}s)...")
+    for i in tqdm(range(n_instances), desc="  OR-Tools", unit="inst"):
+        c = coords[i].cpu().numpy()
+        d = demands[i].cpu().numpy().astype(int)
+        cost, _ = solve_one_with_routes(c, d, capacity, time_limit)
+        if cost is not None: results.append(cost)
+    if results:
+        avg = sum(results) / len(results)
+        print(f"  OR-Tools avg on test: {avg:.4f}  ({len(results)}/{n_instances} solved)")
+        return avg
+    return None
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -114,11 +123,10 @@ def main():
         print("       Train first with: python train_n50.py")
         sys.exit(1)
 
-    policy = QAPPolicy()
-    policy.load_state_dict(torch.load(MODEL_PATH, map_location=device))
-    policy.to(device)
-    policy.eval()
-
+    policy = QAPPolicy(knn_k=KNN_K, amp_dim=AMP_DIM, hidden_dim=HIDDEN_DIM)
+    ckpt = torch.load(MODEL_PATH, map_location=device, weights_only=False)
+    policy.load_state_dict(ckpt)
+    policy.to(device).eval()
     n_params = sum(p.numel() for p in policy.parameters())
 
     if not os.path.exists(TEST_PATH):
@@ -128,137 +136,140 @@ def main():
     coords, demands, capacity = load_dataset(TEST_PATH, device=str(device))
     B_total = coords.size(0)
 
-    print("=" * 60)
-    print(f"  QAP-DRL Test — CVRP-{GRAPH_SIZE}")
-    print("=" * 60)
+    # ── OR-Tools reference on test set ──────────────────────────────────
+    print(f"\n  [0/3] Computing OR-Tools reference on {ORTOOLS_TEST_N} test instances...")
+    ORTOOLS_REF = run_ortools_on_test(coords, demands, capacity, ORTOOLS_TEST_N, ORTOOLS_TIME)
+    if ORTOOLS_REF is None:
+        ORTOOLS_REF = LKH3_REF  # fallback
+        print(f"  Using LKH3 ref as fallback: {ORTOOLS_REF}")
+
+    print("=" * 68)
+    print(f"  QAP-DRL Test — CVRP-{GRAPH_SIZE} (Phase 2: {AMP_DIM}D)")
+    print("=" * 68)
     print(f"  Model       : {MODEL_PATH}")
     print(f"  Test set    : {TEST_PATH}  ({B_total} instances)")
     print(f"  Device      : {device}")
     print(f"  Parameters  : {n_params}")
-    print("=" * 60)
+    print(f"  OR-Tools ref: {ORTOOLS_REF:.4f}")
+    print("=" * 68)
 
-    all_dists = []
+    # ── Greedy evaluation ───────────────────────────────────────────────
+    print("\n  [1/3] Greedy evaluation...")
+    all_greedy_dists = []
     n_feasible = 0
-    best_inst_dist = float("inf")
-    best_inst_coords = None
-    best_inst_actions = None
+    best_dist = float("inf"); worst_dist = float("-inf")
+    best_coords = best_actions = worst_coords = worst_actions = None
     t_start = time.time()
 
     n_batches = (B_total + EVAL_BATCH_SIZE - 1) // EVAL_BATCH_SIZE
-    for i in tqdm(range(0, B_total, EVAL_BATCH_SIZE),
-                  total=n_batches, desc="Testing", unit="batch"):
+    for i in tqdm(range(0, B_total, EVAL_BATCH_SIZE), total=n_batches, desc="  Greedy"):
         j = min(i + EVAL_BATCH_SIZE, B_total)
-        bc = coords[i:j]
-        bd = demands[i:j]
-        B = bc.size(0)
-
+        bc, bd, B = coords[i:j], demands[i:j], min(EVAL_BATCH_SIZE, j-i)
         env = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
-        state = env.reset({
-            "coords": bc,
-            "demands": bd,
-            "capacity": torch.full((B,), float(capacity), device=device),
-        })
-
+        state = env.reset({"coords": bc, "demands": bd,
+                           "capacity": torch.full((B,), float(capacity), device=device)})
         with torch.no_grad():
             actions, _, _ = policy(state, env, deterministic=True)
-
         T = actions.shape[1]
         idx = actions.unsqueeze(-1).expand(B, T, 2)
-        route = bc.gather(1, idx)
-        depot = bc[:, 0:1, :]
+        route = bc.gather(1, idx); depot = bc[:, 0:1, :]
         full = torch.cat([depot, route, depot], dim=1)
         dists = (full[:, 1:] - full[:, :-1]).norm(p=2, dim=-1).sum(-1)
-        all_dists.append(dists)
-
-        batch_best = dists.argmin().item()
-        if dists[batch_best].item() < best_inst_dist:
-            best_inst_dist = dists[batch_best].item()
-            best_inst_coords = bc[batch_best].cpu()
-            best_inst_actions = actions[batch_best].cpu()
-
+        all_greedy_dists.append(dists)
+        bi = dists.argmin().item(); wi = dists.argmax().item()
+        if dists[bi].item() < best_dist:
+            best_dist = dists[bi].item(); best_coords = bc[bi].cpu(); best_actions = actions[bi].cpu()
+        if dists[wi].item() > worst_dist:
+            worst_dist = dists[wi].item(); worst_coords = bc[wi].cpu(); worst_actions = actions[wi].cpu()
         n_feasible += check_feasibility(bd, capacity, actions)
 
-    total_time = time.time() - t_start
-    all_dists = torch.cat(all_dists)
+    greedy_time = time.time() - t_start
+    all_greedy_dists = torch.cat(all_greedy_dists)
+    greedy_avg = all_greedy_dists.mean().item()
 
-    avg = all_dists.mean().item()
-    std = all_dists.std().item()
-    mn = all_dists.min().item()
-    mx = all_dists.max().item()
-    gap = 100.0 * (avg - LKH3_REF) / LKH3_REF
+    # ── Augmented evaluation ────────────────────────────────────────────
+    print(f"\n  [2/3] Augmented evaluation (x{AUG_SAMPLES})...")
+    from training.evaluate import _aug_transforms
+    transforms = _aug_transforms()
+    all_aug_dists = []
+    t_start_aug = time.time()
+
+    for i in tqdm(range(0, B_total, EVAL_BATCH_SIZE), total=n_batches, desc="  Aug×8"):
+        j = min(i + EVAL_BATCH_SIZE, B_total)
+        bc, bd, B = coords[i:j].to(device), demands[i:j].to(device), min(EVAL_BATCH_SIZE, j-i)
+        best_batch = None
+        for t_idx in range(min(AUG_SAMPLES, 8)):
+            aug_c = transforms[t_idx](bc)
+            env = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
+            state = env.reset({"coords": aug_c, "demands": bd,
+                               "capacity": torch.full((B,), float(capacity), device=device)})
+            with torch.no_grad():
+                actions, _, _ = policy(state, env, deterministic=True)
+            T = actions.shape[1]
+            idx = actions.unsqueeze(-1).expand(B, T, 2)
+            route = bc.gather(1, idx); depot = bc[:, 0:1, :]
+            full = torch.cat([depot, route, depot], dim=1)
+            dists = (full[:, 1:] - full[:, :-1]).norm(p=2, dim=-1).sum(-1)
+            best_batch = dists if best_batch is None else torch.minimum(best_batch, dists)
+        all_aug_dists.append(best_batch)
+
+    aug_time = time.time() - t_start_aug
+    all_aug_dists = torch.cat(all_aug_dists)
+    aug_avg = all_aug_dists.mean().item()
+    aug_std = all_aug_dists.std().item()
+
+    # ── Results ─────────────────────────────────────────────────────────
     feas_rate = n_feasible / B_total
-    ms_per_inst = (total_time / B_total) * 1000
+    gap_ort = 100.0 * (aug_avg - ORTOOLS_REF) / ORTOOLS_REF
+    greedy_gap = 100.0 * (greedy_avg - ORTOOLS_REF) / ORTOOLS_REF
+    p10, p25, p50, p75, p90 = [torch.quantile(all_aug_dists, q).item() for q in [.1,.25,.5,.75,.9]]
 
     print()
-    print("=" * 60)
-    print(f"  Results — CVRP-{GRAPH_SIZE}  ({B_total} instances)")
-    print("=" * 60)
-    print(f"  Avg tour length    : {avg:.4f}")
-    print(f"  vs LKH3 gap        : {gap:+.2f}%  (LKH3 ref = {LKH3_REF})")
-    print(f"  Min tour length    : {mn:.4f}")
-    print(f"  Max tour length    : {mx:.4f}")
-    print(f"  Std tour length    : {std:.4f}")
-    print(f"  Feasibility rate   : {feas_rate * 100:.2f}%"
-          f"  ({n_feasible}/{B_total})")
-    print(f"  Inference time     : {ms_per_inst:.2f} ms/instance")
-    print(f"  Total time         : {total_time:.1f}s")
-    print("=" * 60)
+    print("=" * 68)
+    print(f"  TEST RESULTS — CVRP-{GRAPH_SIZE}  ({B_total} instances)")
+    print("=" * 68)
+    print(f"  Greedy (no aug) : {greedy_avg:.4f}  (gap: {greedy_gap:+.2f}%)")
+    print(f"  Augmented (x{AUG_SAMPLES}) : {aug_avg:.4f}  (gap: {gap_ort:+.2f}%)")
+    print(f"  OR-Tools ref    : {ORTOOLS_REF:.4f}")
+    print(f"  Std             : {aug_std:.4f}")
+    print(f"  Percentiles: p10={p10:.3f} p25={p25:.3f} p50={p50:.3f} p75={p75:.3f} p90={p90:.3f}")
+    print(f"  Feasibility     : {feas_rate*100:.2f}%")
+    print(f"  Parameters      : {n_params}")
+    print("=" * 68)
 
+    # ── Save ────────────────────────────────────────────────────────────
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     results = {
-        "graph_size": GRAPH_SIZE,
-        "n_instances": B_total,
-        "avg_tour_length": avg,
-        "lkh3_ref": LKH3_REF,
-        "gap_pct": gap,
-        "min_tour": mn,
-        "max_tour": mx,
-        "std_tour": std,
+        "graph_size": GRAPH_SIZE, "amp_dim": AMP_DIM, "hidden_dim": HIDDEN_DIM,
+        "n_params": n_params, "n_instances": B_total,
+        "greedy_avg": greedy_avg, "aug_avg": aug_avg, "aug_std": aug_std,
+        "gap_ortools_pct": gap_ort,
+        "ortools_ref": ORTOOLS_REF,
+        "p10": p10, "p25": p25, "p50": p50, "p75": p75, "p90": p90,
         "feasibility_rate": feas_rate,
-        "ms_per_instance": ms_per_inst,
-        "total_time_s": total_time,
-        "model_path": MODEL_PATH,
     }
-    out_path = os.path.join(OUTPUT_DIR, "test_results.json")
-    with open(out_path, "w") as f:
+    with open(os.path.join(OUTPUT_DIR, "test_results.json"), "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\n  Results saved to {out_path}")
 
-    # ── Tour length distribution histogram ──────────────────────────────
-    dists_np = all_dists.cpu().numpy()
+    # Histogram
+    fig, ax = plt.subplots(figsize=(10, 5)); fig.patch.set_facecolor("white")
+    ax.hist(all_aug_dists.cpu().numpy(), bins=50, color="#1f77b4", edgecolor="white", alpha=0.85)
+    ax.axvline(aug_avg, color="red", ls="--", lw=1.5, label=f"Mean = {aug_avg:.3f}")
+    ax.axvline(ORTOOLS_REF, color="green", ls="--", lw=1.5, label=f"ORT = {ORTOOLS_REF:.3f}")
+    ax.set_title(f"Tour Length Distribution — CVRP-{GRAPH_SIZE} Test"); ax.legend()
+    fig.savefig(os.path.join(OUTPUT_DIR, "test_distribution.png"), dpi=150, bbox_inches="tight")
+    plt.close(fig)
 
-    fig_hist, ax_h = plt.subplots(figsize=(8, 5))
-    fig_hist.patch.set_facecolor("white")
-    ax_h.hist(dists_np, bins=50, color="#1f77b4", edgecolor="white",
-              alpha=0.85, label="Tour lengths")
-    ax_h.axvline(avg, color="red", linestyle="--", linewidth=1.5,
-                 label=f"Mean = {avg:.2f}")
-    ax_h.axvline(LKH3_REF, color="green", linestyle="--", linewidth=1.5,
-                 label=f"LKH3 = {LKH3_REF}")
-    ax_h.set_title(f"Tour Length Distribution — CVRP-{GRAPH_SIZE} Test Set",
-                   fontsize=14)
-    ax_h.set_xlabel("Tour Length", fontsize=12)
-    ax_h.set_ylabel("Count", fontsize=12)
-    ax_h.annotate(f"Mean: {avg:.2f}\nGap: {gap:+.1f}%",
-                  xy=(0.97, 0.95), xycoords="axes fraction",
-                  ha="right", va="top", fontsize=11,
-                  bbox=dict(boxstyle="round,pad=0.3", fc="wheat", alpha=0.8))
-    ax_h.legend(fontsize=10)
-
-    hist_path = os.path.join(OUTPUT_DIR, "test_distribution.png")
-    fig_hist.savefig(hist_path, dpi=150, bbox_inches="tight")
-    print(f"  Saved: {hist_path}")
-
-    # ── Best test route map ─────────────────────────────────────────────
-    plot_route_map(
-        best_inst_coords.numpy(),
-        best_inst_actions.tolist(),
-        GRAPH_SIZE, best_inst_dist,
-        f"Best Test Route — CVRP-{GRAPH_SIZE} | Tour Length: {best_inst_dist:.2f}",
-        os.path.join(OUTPUT_DIR, "test_best_route.png"),
-    )
-
-    plt.show()
+    # Route maps
+    if best_coords is not None:
+        plot_route_map(best_coords.numpy(), best_actions.tolist(), GRAPH_SIZE, best_dist,
+                       f"Best Test Route — CVRP-{GRAPH_SIZE} | Tour: {best_dist:.3f}",
+                       os.path.join(OUTPUT_DIR, "test_best_route.png"))
+    if worst_coords is not None:
+        plot_route_map(worst_coords.numpy(), worst_actions.tolist(), GRAPH_SIZE, worst_dist,
+                       f"Worst Test Route — CVRP-{GRAPH_SIZE} | Tour: {worst_dist:.3f}",
+                       os.path.join(OUTPUT_DIR, "test_worst_route.png"))
+    print("\n  Done.")
 
 
 if __name__ == "__main__":

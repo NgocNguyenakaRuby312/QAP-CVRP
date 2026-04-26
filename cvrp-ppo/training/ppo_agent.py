@@ -93,15 +93,13 @@ class PPOTrainer:
         self.device        = device
         self.log_dir       = log_dir
 
-        # Fix 3: separate param group — weight_decay on μ to resist explosion
-        mu_params  = [p for n, p in policy.named_parameters() if 'mu_param' in n]
-        base_params = [p for n, p in policy.named_parameters() if 'mu_param' not in n]
-        self.optimizer = Adam([
-            {'params': base_params, 'lr': lr, 'weight_decay': 0.0},
-            {'params': mu_params,   'lr': lr, 'weight_decay': 1e-2},
-        ], lr=lr)
-        self.scheduler = CosineAnnealingLR(
-            self.optimizer, T_max=total_steps, eta_min=1e-5  # v4: was 1e-6
+        # Fix 1: single param group — no weight_decay on μ (let it find natural value)
+        # μ clamp [0,10] prevents explosion; weight_decay was crushing it to 0.09
+        self.optimizer = Adam(policy.parameters(), lr=lr)
+        # Fix 3: CosineAnnealingWarmRestarts — periodic LR resets to escape local minima
+        from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+        self.scheduler = CosineAnnealingWarmRestarts(
+            self.optimizer, T_0=50, T_mult=2, eta_min=1e-5  # restarts at ep 50, 150
         )
 
         self.buffer = RolloutBuffer(device=device)
