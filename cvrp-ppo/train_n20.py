@@ -70,6 +70,7 @@ VALUE_COEF           = 0.5
 KNN_K                = 10              # (P1) covers 50% of N=20 graph
 MU_INIT              = 0.5             # (C1) distance penalty scalar, learnable
 AMP_DIM              = 4               # (P2) amplitude dimension: 4D hypersphere S³
+HIDDEN_DIM           = 32              # (P2+) rotation MLP hidden width
 SEED                 = 1234
 BATCHES_PER_EPOCH    = EPOCH_SIZE // BATCH_SIZE          # 250
 TOTAL_OPT_STEPS      = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8   # 1,200,000
@@ -393,7 +394,7 @@ def main():
         best_epoch  = ckpt_data["iteration"]
 
     # (P2) amp_dim=AMP_DIM; (C1) mu_init=MU_INIT; Fix 4: hidden_dim=32
-    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT, amp_dim=AMP_DIM, hidden_dim=32)
+    policy    = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT, amp_dim=AMP_DIM, hidden_dim=HIDDEN_DIM)
     env       = CVRPEnv(num_loc=GRAPH_SIZE, device=str(device))
     generator = CVRPGenerator(GRAPH_SIZE, CAPACITY)
     n_params  = sum(p.numel() for p in policy.parameters())
@@ -582,7 +583,7 @@ def main():
     trainer.logger.close()
 
     # ── Post-training visualisation ──────────────────────────────────────
-    best_policy = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT)
+    best_policy = QAPPolicy(knn_k=KNN_K, mu_init=MU_INIT, amp_dim=AMP_DIM, hidden_dim=HIDDEN_DIM)
     best_policy.load_state_dict(
         torch.load(os.path.join(OUTPUT_DIR, "best_model.pt"), map_location=device)
     )

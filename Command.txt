@@ -6,4 +6,5 @@ python validation_methods/compare_all.py --n 20 --instances 200
 python validation_methods/compare_all.py --n 50 --instances 200
 
 rm "outputs\n50\epochs\*.pt"
+Remove-Item "C:\Users\ASUS\Downloads\Thesis Code QAP_VRP\cvrp-ppo\outputs\n20\epochs\epoch_*.pt"
 
