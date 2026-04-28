@@ -4,12 +4,12 @@ encoder/rotation_mlp.py
 MLP that predicts per-node rotation angles.
 
 Phase 2 (4D):
-    θᵢ = MLP(xᵢ)   MLP: 5 → 16 → 6 (one angle per Givens plane in SO(4))
-    Parameters: 5×16 + 16 + 16×6 + 6 = 118
+    θᵢ = MLP(xᵢ)   MLP: 5 → 32 → 6 (one angle per Givens plane in SO(4))
+    Parameters: 5×32 + 32 + 32×6 + 6 = 230
 
 Phase 1 (2D, backward compat):
-    θᵢ = MLP(xᵢ)   MLP: 5 → 16 → 1
-    Parameters: 5×16 + 16 + 16×1 + 1 = 113
+    θᵢ = MLP(xᵢ)   MLP: 5 → 32 → 1
+    Parameters: 5×32 + 32 + 32×1 + 1 = 225
 """
 
 import torch
@@ -22,17 +22,17 @@ class RotationMLP(nn.Module):
 
     Args:
         input_dim:  feature dimension (default 5)
-        hidden_dim: hidden layer width (default 16)
+        hidden_dim: hidden layer width (default 32)
         n_angles:   number of output angles (1 for 2D, 6 for 4D SO(4))
     """
 
-    def __init__(self, input_dim: int = 5, hidden_dim: int = 16, n_angles: int = 6):
+    def __init__(self, input_dim: int = 5, hidden_dim: int = 32, n_angles: int = 6):
         super().__init__()
         self.n_angles = n_angles
         self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),                          # 5 → 16
+            nn.Linear(input_dim, hidden_dim),                          # 5 → 32
             nn.Tanh(),                                                 # tanh activation
-            nn.Linear(hidden_dim, n_angles),                           # 16 → n_angles
+            nn.Linear(hidden_dim, n_angles),                           # 32 → n_angles
         )
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:

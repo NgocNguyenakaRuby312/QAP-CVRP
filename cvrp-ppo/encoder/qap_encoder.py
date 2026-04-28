@@ -33,15 +33,15 @@ class QAPEncoder(nn.Module):
     Args:
         input_dim:  feature dimension (default 5)
         amp_dim:    amplitude space dimension (default 4 for Phase 2)
-        hidden_dim: rotation MLP hidden width (default 16)
+        hidden_dim: rotation MLP hidden width (default 32)
     """
 
-    def __init__(self, input_dim: int = 5, amp_dim: int = 4, hidden_dim: int = 16):
+    def __init__(self, input_dim: int = 5, amp_dim: int = 4, hidden_dim: int = 32):
         super().__init__()
         n_angles = 6 if amp_dim == 4 else 1                           # SO(4)=6, SO(2)=1
         self.amplitude_proj = AmplitudeProjection(input_dim, amp_dim)  # 5→D
         self.rotation_mlp   = RotationMLP(input_dim, hidden_dim,
-                                          n_angles=n_angles)           # 5→16→n_angles
+                                          n_angles=n_angles)           # 5→32→n_angles
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """
@@ -64,12 +64,12 @@ class FullEncoder(nn.Module):
     Args:
         input_dim:  node feature size   (default 5)
         amp_dim:    amplitude space dim (default 4 for Phase 2)
-        hidden_dim: rotation MLP width  (default 16)
+        hidden_dim: rotation MLP width  (default 32)
         knn_k:      kNN neighbourhood   (default 5)
     """
 
     def __init__(self, input_dim: int = 5, amp_dim: int = 4,
-                 hidden_dim: int = 16, knn_k: int = 5):
+                 hidden_dim: int = 32, knn_k: int = 5):
         super().__init__()
         self.feature_builder = FeatureBuilder()
         self.qap_encoder     = QAPEncoder(input_dim, amp_dim, hidden_dim)

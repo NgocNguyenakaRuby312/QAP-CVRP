@@ -91,11 +91,11 @@ class PerNodeRotation(nn.Module):
 
     Args:
         input_dim:  feature dimension (default 5)
-        hidden_dim: MLP hidden width  (default 16)
+        hidden_dim: MLP hidden width  (default 32)
         amp_dim:    amplitude dimension (2 or 4)
     """
 
-    def __init__(self, input_dim: int = 5, hidden_dim: int = 16, amp_dim: int = 4):
+    def __init__(self, input_dim: int = 5, hidden_dim: int = 32, amp_dim: int = 4):
         super().__init__()
         self.amp_dim = amp_dim
         n_angles = 6 if amp_dim == 4 else 1

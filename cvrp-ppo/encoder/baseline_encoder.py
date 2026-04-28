@@ -8,17 +8,17 @@ Used for Ablation Study Tier 2, variant (b):
 
 Architecture:
     features [B, N+1, 5]
-        → Linear(5→2) + ReLU  (plain MLP, no L2 norm, no rotation)
-        → embedding [B, N+1, 2]
+        → Linear(5→4) + ReLU  (plain MLP, no L2 norm, no rotation)
+        → embedding [B, N+1, 4]
 
-This is intentionally matched to QAPEncoder's OUTPUT DIMENSION (2D) so that
+This is intentionally matched to QAPEncoder's OUTPUT DIMENSION (4D) so that
 the decoder, critic, and PPO loop are completely unchanged.  The only
 difference is the encoder: no unit-norm constraint, no rotation matrix,
 no quantum-inspired interpretation.
 
 Parameter count:
-    Linear(5→2):  5×2 + 2 = 12 params
-    (vs QAPEncoder: 12 proj + 113 rotation = 125 params)
+    Linear(5→4):  5×4 + 4 = 24 params
+    (vs QAPEncoder: 24 proj + 230 rotation = 254 params)
 
 This means the baseline actually has FEWER parameters — which is conservative
 and strengthens any result showing QAP-DRL is better.
@@ -42,20 +42,20 @@ class BaselineEncoder(nn.Module):
     """
     Plain MLP encoder — no amplitude projection, no rotation.
 
-    Maps 5D node features to 2D embeddings using a standard
+    Maps 5D node features to 4D embeddings using a standard
     linear layer + ReLU activation.  No unit-norm constraint.
     No rotation matrix.  Pure DRL baseline.
 
     Args:
         input_dim:  feature dimension (default 5, must match QAPEncoder)
-        output_dim: embedding dimension (default 2, must match QAPEncoder)
+        output_dim: embedding dimension (default 4, must match QAPEncoder)
 
-    Parameter count: 5×2 + 2 = 12
+    Parameter count: 5×4 + 4 = 24
     """
 
     def __init__(self, input_dim: int = 5, output_dim: int = 4):
         super().__init__()
-        self.proj = nn.Linear(input_dim, output_dim)  # 12 params
+        self.proj = nn.Linear(input_dim, output_dim)  # 24 params
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         """
@@ -63,9 +63,9 @@ class BaselineEncoder(nn.Module):
             features: [B, N+1, 5]
 
         Returns:
-            embedding: [B, N+1, 2]  — NOT unit-norm, no rotation applied
+            embedding: [B, N+1, D]  — NOT unit-norm, no rotation applied
         """
-        return F.relu(self.proj(features))             # [B, N+1, 2]
+        return F.relu(self.proj(features))             # [B, N+1, D]
 
 
 class FullBaselineEncoder(nn.Module):
@@ -89,11 +89,11 @@ class FullBaselineEncoder(nn.Module):
             state: dict with coords [B,N+1,2], demands [B,N+1], capacity
 
         Returns:
-            embedding:   [B, N+1, 2]  plain MLP embedding (no norm, no rotation)
+            embedding:   [B, N+1, D]  plain MLP embedding (no norm, no rotation)
             features:    [B, N+1, 5]  raw 5D features
             knn_indices: [B, N+1, k]  spatial kNN (identical to QAP version)
         """
         features    = self.feature_builder(state)                      # [B, N+1, 5]
-        embedding   = self.baseline_encoder(features)                  # [B, N+1, 2]
+        embedding   = self.baseline_encoder(features)                  # [B, N+1, D]
         knn_indices = compute_knn(state["coords"], self.knn_k)         # [B, N+1, k]
         return embedding, features, knn_indices

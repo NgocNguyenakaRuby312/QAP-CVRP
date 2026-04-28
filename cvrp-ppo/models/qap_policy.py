@@ -5,12 +5,12 @@ QAPPolicy — actor + critic (shared encoder) for PPO.
 
 Phase 2 (4D amplitudes):
     W (amplitude proj): 4×5 + 4 = 24
-    MLP rotation:       5×16+16+16×6+6 = 118
+    MLP rotation:       5×32+32+32×6+6 = 230
     W_q:                4×8 = 32        (context_dim = 4+1+1+2 = 8)
     λ, μ:               2
     Critic MLP:         4→64→1 = 321
-    Actor total:        ~176
-    Full total:         ~497
+    Actor total:        ~288
+    Full total:         ~609
 """
 
 import torch
@@ -41,7 +41,7 @@ class QAPPolicy(nn.Module):
         self,
         feature_dim:   int   = 5,
         amp_dim:       int   = 4,         # Phase 2: was 2
-        hidden_dim:    int   = 16,
+        hidden_dim:    int   = 32,
         knn_k:         int   = 5,
         lambda_init:   float = 0.1,
         mu_init:       float = 0.5,
@@ -185,13 +185,26 @@ class QAPPolicy(nn.Module):
         # ── Clamp learnable scalars (must match hybrid_scoring.py) ───
         mu_eff  = torch.clamp(self.decoder.hybrid.mu_param,     min=0.0, max=20.0)
         lam_eff = torch.clamp(self.decoder.hybrid.lambda_param, min=-2.0, max=3.0)
+        nu_eff  = torch.clamp(self.decoder.hybrid.nu_param,     min=-2.0, max=3.0)
 
-        # ── Full 3-term score ────────────────────────────────────────
+        # ── Full 4-term score ────────────────────────────────────────
         scores = (
             context_scores
             + lam_eff * interference
             - mu_eff  * dist_to_nodes
         )
+
+        # ── Term 4: demand awareness (nu term) ───────────────────────
+        if isinstance(capacity, (int, float)):
+            cap_val = max(float(capacity), 1e-8)
+        elif hasattr(capacity, 'dim') and capacity.dim() == 0:
+            cap_val = max(capacity.item(), 1e-8)
+        else:
+            cap_val = capacity.clamp(min=1e-8)
+            if cap_val.dim() == 1:  # [B] -> scalar (use first, all same)
+                cap_val = cap_val[0].item()
+        demand_ratio = demands.unsqueeze(1).expand(mb, T, -1) / cap_val  # [mb, T, N+1]
+        scores = scores + nu_eff * demand_ratio
         scores       = scores.masked_fill(mask_3d, -1e9)
         log_probs_3d = F.log_softmax(scores, dim=-1)                  # [mb, T, N+1]
 

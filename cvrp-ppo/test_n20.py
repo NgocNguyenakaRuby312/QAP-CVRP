@@ -44,7 +44,7 @@ GRAPH_SIZE      = 20
 CAPACITY        = 30
 AMP_DIM         = 4                # Phase 2: 4D amplitudes
 HIDDEN_DIM      = 32               # Fix 4: rotation MLP hidden width
-KNN_K           = 10
+KNN_K           = 15               # must match train_n20.py
 
 # References
 ORTOOLS_REF     = 6.1509           # from training OR-Tools benchmark (1K instances)

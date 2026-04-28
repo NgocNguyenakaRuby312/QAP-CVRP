@@ -296,7 +296,8 @@ class PPOTrainer:
             "improvement":   self._rollout_stats["improvement"],
             # ── Model state ───────────────────────────────────────────
             "lambda_val":    self.policy.decoder.hybrid.lambda_param.item(),
-            "mu_val":        self.policy.decoder.hybrid.mu_param.item(),  # Change 1
+            "mu_val":        self.policy.decoder.hybrid.mu_param.item(),
+            "nu_val":        self.policy.decoder.hybrid.nu_param.item(),
             "lr":            self.optimizer.param_groups[0]["lr"],
         }
 

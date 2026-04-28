@@ -8,7 +8,7 @@ Autoregressive decoder: repeats Steps 5 + 6 until all N customers visited.
 Change 1 + Change 2 (May 2026):
     - context_query now returns (query, current_coords)
     - hybrid scoring now receives current_coords and all_coords
-    - context_dim defaults to 6 (was 4)
+    - context_dim defaults to 8 (D+4 where D=4)
 """
 
 import torch
@@ -61,10 +61,12 @@ class QAPDecoder(nn.Module):
             state, psi_prime, step, n_customers
         )
 
-        # Change 1: distance penalty uses current_coords and all_coords
+        # scoring with all 4 terms (demands/capacity for nu term)
         log_probs = self.hybrid(
             query, psi_prime, knn_indices, mask,
-            current_coords, state["coords"]                            # [B,2], [B,N+1,2]
+            current_coords, state["coords"],
+            demands=state.get("demands"),
+            capacity=state.get("capacity", 1.0),
         )                                                              # [B, N+1]
         return log_probs, mask
 

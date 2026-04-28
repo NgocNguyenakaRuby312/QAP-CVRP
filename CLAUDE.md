@@ -29,12 +29,12 @@ Score(j) = q · ψ'ⱼ  +  λ · E_kNN(j)  −  μ · dist(vₜ, vⱼ)
 - +1 parameter
 
 ### Change 2 — Spatial Context Grounding (§3.3.3)
-Context vector expands from ℝ⁴ → ℝ⁶:
+Context vector: ℝ⁸ = [ψ'_curr(4), cap/C(1), t/N(1), x_curr(1), y_curr(1)]
 ```
-ctx = [ψ'_curr(2), cap/C(1), t/N(1), x_curr(1), y_curr(1)]   W_q ∈ ℝ^{2×6}
+ctx = [ψ'_curr(4), cap/C(1), t/N(1), x_curr(1), y_curr(1)]   W_q ∈ ℝ^{4×8}
 ```
-- Implemented in: `decoder/context_query.py` (`self.Wq` is now 2×6)
-- Returns `(query [B,2], current_coords [B,2])` — always unpack both
+- Implemented in: `decoder/context_query.py` (`self.Wq` is now 4×8)
+- Returns `(query [B,4], current_coords [B,2])` — always unpack both
 - +4 parameters
 
 ### Change 3 — Dynamic Proximity Feature (§3.3.1)
@@ -64,13 +64,13 @@ CVRP Input [coords, demands, capacity]
     ↓
 [2] Feature Construction → xᵢ ∈ ℝ⁵     [d/C, dist_depot, x, y, angle/π]   (STATIC)
     ↓
-[3] Amplitude Projection → ψᵢ ∈ ℝ²       Linear(5→2) + L2Norm  ‖ψ‖=1
+[3] Amplitude Projection → ψᵢ ∈ ℝ⁴       Linear(5→4) + L2Norm  ‖ψ‖=1   (S³ hypersphere)
     ↓
-[4] Per-Node Rotation → ψ'ᵢ ∈ ℝ²         MLP(5→16→1,tanh)→θ → R(θ)·ψ  ‖ψ'‖=1
+[4] Per-Node Rotation → ψ'ᵢ ∈ ℝ⁴         MLP(5→32→6,tanh)→6 Givens angles → SO(4)·ψ  ‖ψ'‖=1
     ↓  (encoder runs ONCE — psi_prime fixed for all decode steps)
-[5] Context → Query                        [ψ'_curr, cap/C, t/N, x_curr, y_curr] → W_q(6→2) → q  ← Change 2
+[5] Context → Query                        [ψ'_curr(4), cap/C, t/N, x_curr, y_curr] → W_q(8→4) → q
     ↓  ↑ repeat N times
-[6] Hybrid Scoring + Mask + Sample         Score(j) = q·ψ'_j + λ·E_kNN(j) − μ·dist(vₜ,vⱼ)  ← Change 1
+[6] Hybrid Scoring + Mask + Sample         Score(j) = q·ψ'_j + λ·E_kNN(j) − μ·dist(vₜ,vⱼ)
     ↓
 [7] PPO Update                             R = -TotalDistance, GAE advantages, K=3 epochs
 ```
@@ -87,21 +87,21 @@ INPUT
 
 ENCODER — QAP mode (default, STATIC — runs once)
   features:            [B, N+1, 5]      [d/C, dist_depot, x, y, angle/π]
-  psi (projected):     [B, N+1, 2]      ← MUST be unit norm
-  theta (from MLP):    [B, N+1]
-  psi_prime (rotated): [B, N+1, 2]      ← MUST be unit norm, FIXED for all steps
+  psi (projected):     [B, N+1, 4]      ← S³ hypersphere, MUST be unit norm
+  theta (from MLP):    [B, N+1, 6]      ← 6 Givens angles for SO(4)
+  psi_prime (rotated): [B, N+1, 4]      ← MUST be unit norm, FIXED for all steps
 
 ENCODER — baseline mode (ablation)
   features:            [B, N+1, 5]      same features
-  embedding:           [B, N+1, 2]      ← NOT unit norm (ReLU output)
+  embedding:           [B, N+1, 4]      ← NOT unit norm (ReLU output)
 
-KNN  (precomputed once per instance, from spatial coords — not re-done per step)
+KNN  (precomputed once per instance, from spatial coords)
   knn_indices:         [B, N+1, k]
 
 DECODER (per step t)
-  psi_curr:            [B, 2]           zero vector if at depot
-  context:             [B, 6]           [ψ'_curr(2), cap/C(1), t/N(1), x_curr(1), y_curr(1)]
-  query:               [B, 2]
+  psi_curr:            [B, 4]           zero vector if at depot
+  context:             [B, 8]           [ψ'_curr(4), cap/C(1), t/N(1), x_curr(1), y_curr(1)]
+  query:               [B, 4]
   current_coords:      [B, 2]           returned by context_query
   context_scores:      [B, N+1]         q · ψ'_j
   interference:        [B, N+1]         Σ_kNN ψ'_i · ψ'_j
@@ -111,8 +111,8 @@ DECODER (per step t)
   action:              [B]
 
 evaluate_actions() PPO path
-  cur_coords_3d:       [mb, T, 2]       vehicle coords per step (for dist penalty)
-  psi_prime_3d:        [mb, T, N+1, 2]  BROADCAST from static psi_prime
+  cur_coords_3d:       [mb, T, 2]       vehicle coords per step
+  psi_prime_3d:        [mb, T, N+1, 4]  BROADCAST from static psi_prime
   dist_to_nodes:       [mb, T, N+1]
   scores:              [mb, T, N+1]
 ```
@@ -130,19 +130,19 @@ xᵢ = [d_i/C,  dist(i,depot),  x_i,  y_i,  atan2(Δy,Δx)/π]
 
 ### Amplitude Projection  (§3.X.4)
 ```
-[α_i, β_i]^T = Normalize(W·x_i + b)     W ∈ ℝ^{2×5}, b ∈ ℝ^2
+[α_i, β_i, γ_i, δ_i]^T = Normalize(W·x_i + b)     W ∈ ℝ^{4×5}, b ∈ ℝ^4
 ```
 
 ### Rotation  (§3.X.5)
 ```
-θ_i = MLP(x_i)      MLP: 5 → 16 → 1, tanh
-ψ'_i = R(θ_i) · ψ_i
+θ_i = MLP(x_i)      MLP: 5 → 32 → 6, tanh   (6 Givens angles for SO(4))
+ψ'_i = R(Θ_i) · ψ_i   R = G₆·G₅·G₄·G₃·G₂·G₁ on planes (01)(02)(03)(12)(13)(23)
 ```
 
-### Context Query  (§3.X.6) — Change 2
+### Context Query  (§3.X.6)
 ```
-ctx = [ψ'_curr(2D), cap/C(1D), t/N(1D), x_curr(1D), y_curr(1D)]  ∈ ℝ⁶
-q   = W_q · ctx          W_q ∈ ℝ^{2×6}, NO bias
+ctx = [ψ'_curr(4D), cap/C(1D), t/N(1D), x_curr(1D), y_curr(1D)]  ∈ ℝ⁸
+q   = W_q · ctx          W_q ∈ ℝ^{4×8}, NO bias
 ```
 
 ### Hybrid Scoring  (§3.X.7) — Change 1
@@ -157,25 +157,29 @@ Score(j) = q·ψ'_j  +  λ · Σ_{i∈kNN(j)} (ψ'_i · ψ'_j)  −  μ · dist(
 
 | Component | Spec | Params |
 |---|---|---|
-| W (amplitude proj) | 2×5 | 10 |
-| b (proj bias) | 2×1 | 2 |
-| MLP rotation | 5→16→1 | ~113 |
-| W_q (query proj) | **2×6**, no bias | **12** (+4 Change 2) |
+| W (amplitude proj) | 4×5 | 20 |
+| b (proj bias) | 4×1 | 4 |
+| MLP rotation | 5→32→6 | ~230 |
+| W_q (query proj) | 4×8, no bias | 32 |
 | λ (interference) | scalar | 1 |
-| μ (dist penalty) | **scalar** | **1** (+1 Change 1) |
-| Critic MLP | 2→64→1 | ~257 |
-| **Actor total** | | **~139** |
-| **Full total** | | **~396** |
+| μ (dist penalty) | scalar | 1 |
+| Critic MLP | 4→64→1 | ~321 |
+| **Actor total** | | **~288** |
+| **Full total** | | **~609** |
 
 ---
 
-## 6. Current Hyperparameters — Phase 1b (v9)
+## 6. Current Hyperparameters — Phase 2+
 
 ```python
 BATCH_SIZE   = 512;  EPOCH_SIZE  = 128_000;  N_EPOCHS = 200
-LR           = 1e-4; ENTROPY_COEF= 0.01;     KNN_K    = 10
+LR           = 1e-4; ENTROPY_COEF= 0.03;     KNN_K    = 10
 MU_INIT      = 0.5;  LAMBDA_INIT = 0.1;      AUG_SAMPLES = 8
+AMP_DIM      = 4;    HIDDEN_DIM  = 32
 VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
+Scheduler: CosineAnnealingWarmRestarts(T_0=50, T_mult=2, eta_min=1e-5)
+μ clamp: [0, 20];  λ clamp: [-2, 3]
+No weight_decay on μ
 ```
 
 ---
@@ -185,14 +189,15 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 | File | Change | Status |
 |------|--------|--------|
 | `encoder/feature_constructor.py` | Static 5D features | ✓ Done |
-| `encoder/amplitude_projection.py` | input_dim=5, W 2×5 | ✓ Done |
-| `encoder/rotation_mlp.py` | input_dim=5, 5→16→1 | ✓ Done |
-| `encoder/qap_encoder.py` | input_dim=5, static forward(state) | ✓ Done |
-| `decoder/context_query.py` | Change 2: ctx ℝ⁴→ℝ⁶, Wq 2×4→2×6 | ✓ Done |
-| `decoder/hybrid_scoring.py` | Change 1: +mu_param, −μ·dist | ✓ Done |
-| `decoder/qap_decoder.py` | C1+C2: current_coords to scoring, no encoder arg | ✓ Done |
-| `models/qap_policy.py` | C1+C2: feature_dim=5, broadcast psi_prime | ✓ Done |
-| `training/ppo_agent.py` | C1: mu_val in diag | ✓ Done |
+| `encoder/amplitude_projection.py` | output_dim=4, W 4×5 | ✓ Done |
+| `encoder/rotation_mlp.py` | n_angles=6, 5→32→6 | ✓ Done |
+| `encoder/rotation.py` | 6 Givens rotations for SO(4) | ✓ Done |
+| `encoder/qap_encoder.py` | amp_dim=4, static forward(state) | ✓ Done |
+| `decoder/context_query.py` | ctx ℝ⁸, Wq 4×8, embed_dim=4 | ✓ Done |
+| `decoder/hybrid_scoring.py` | dimension-agnostic, μ clamp [0,20], λ clamp [-2,3] | ✓ Done |
+| `decoder/qap_decoder.py` | context_dim=8, embed_dim=4 | ✓ Done |
+| `models/qap_policy.py` | amp_dim=4, context_dim=8, critic 4→64→1 | ✓ Done |
+| `training/ppo_agent.py` | WarmRestarts, no weight_decay on μ | ✓ Done |
 | `train_n20.py` | C1+C2: mu_val logged, chart panel 8 updated | ✓ Done |
 
 ---
@@ -230,6 +235,7 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 | P17 | feature_dim set to 6 | Must be 5. Encoder is static 5D |
 | P18 | Per-step re-encoding attempted | NEVER re-encode. psi_prime is fixed after initial encode |
 | P19 | evaluate_actions rebuilds psi_prime per step | Must BROADCAST static psi_prime — NOT rebuild |
+| P20 | Post-training reload missing amp_dim/hidden_dim | Must pass `amp_dim=AMP_DIM, hidden_dim=HIDDEN_DIM` |
 | P24 | Dense grey gridlines on twinx panels | `.set_zorder(-1)`, `.patch.set_visible(False)`, `.grid(False)` |
 
 ---
@@ -239,20 +245,18 @@ VAL_EVAL_SIZE= 10_000;  ORTOOLS_EVAL_SIZE = 1_000
 ```python
 # Encoder (QAP mode)
 assert features.shape == (B, N+1, 5),     "features must be 5D"
-assert psi_prime.shape == (B, N+1, 2)
+assert psi_prime.shape == (B, N+1, 4),     "4D amplitude vectors"
 norms = psi_prime.norm(dim=-1)
 assert torch.allclose(norms, torch.ones_like(norms), atol=1e-5), "unit norm"
 
-# Context (Change 2)
-assert ctx.shape[-1] == 6,               "context must be 6D (Change 2)"
+# Context (Phase 2)
+assert ctx.shape[-1] == 8,               "context must be 8D (D+4 where D=4)"
 assert current_coords.shape == (B, 2)
+assert query.shape == (B, 4),            "query must be 4D"
 
-# Scoring (Change 1)
+# Scoring
 assert hasattr(model.decoder.hybrid, 'mu_param'), "μ missing"
 assert dist_to_nodes.shape == (B, N+1)
-
-# Encoder is STATIC — no per-step re-encoding
-# evaluate_actions broadcasts psi_prime
 
 # Masking
 assert mask[:, 0].sum() == 0,            "depot must never be masked"

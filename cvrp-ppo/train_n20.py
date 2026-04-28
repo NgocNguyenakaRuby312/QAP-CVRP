@@ -67,14 +67,14 @@ EPOCH_SIZE           = 128_000          # (P1) was 51_200 — thesis spec
 LR                   = 1e-4
 ENTROPY_COEF         = 0.03             # (P2) was 0.01 — prevent premature entropy collapse
 VALUE_COEF           = 0.5
-KNN_K                = 10              # (P1) covers 50% of N=20 graph
+KNN_K                = 15              # Option 4: 75% of N=20 graph (was 10)
 MU_INIT              = 0.5             # (C1) distance penalty scalar, learnable
 AMP_DIM              = 4               # (P2) amplitude dimension: 4D hypersphere S³
 HIDDEN_DIM           = 32              # (P2+) rotation MLP hidden width
 SEED                 = 1234
 BATCHES_PER_EPOCH    = EPOCH_SIZE // BATCH_SIZE          # 250
 TOTAL_OPT_STEPS      = N_EPOCHS * BATCHES_PER_EPOCH * 3 * 8   # 1,200,000
-AUG_SAMPLES          = 8               # (P1) inference augmentation: sample ×8, take best
+AUG_SAMPLES          = 8               # training uses 8 isometric transforms (test uses 16+stochastic)
 OUTPUT_DIR           = os.path.join(SCRIPT_DIR, "outputs", "n20")
 EPOCH_DIR            = os.path.join(OUTPUT_DIR, "epochs")
 ARCHIVE_DIR          = os.path.join(OUTPUT_DIR, "Archive")
@@ -150,12 +150,12 @@ def _load_chart_history(log_path):
     ploss_hist  = []; aploss_hist = []; lr_hist     = []
     vloss_hist  = []; ent_hist    = []; eloss_hist  = []
     gnorm_hist  = []; adv_hist    = []; clip_hist   = []
-    lam_hist    = []; mu_hist     = []  # (C1) mu_val history
+    lam_hist    = []; mu_hist     = []; nu_hist     = []
 
     if not os.path.exists(log_path):
         return (epochs_hist, tour_hist, reward_hist, ploss_hist, aploss_hist,
                 lr_hist, vloss_hist, ent_hist, eloss_hist,
-                gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist)
+                gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist, nu_hist)
     try:
         with open(log_path, "r") as f:
             for line in f:
@@ -178,14 +178,15 @@ def _load_chart_history(log_path):
                 adv_hist.append(row.get("adv_std") or 0.0)
                 clip_hist.append((row.get("clip_fraction") or 0.0) * 100.0)
                 lam_hist.append(row.get("lambda_val") or 0.0)
-                mu_hist.append(row.get("mu_val") or MU_INIT)   # (C1)
+                mu_hist.append(row.get("mu_val") or MU_INIT)
+                nu_hist.append(row.get("nu_val") or 0.0)
     except Exception as e:
         print(f"  [chart history] Could not reload: {e}")
     if epochs_hist:
         print(f"  Chart history  : reloaded {len(epochs_hist)} epochs from train_log.jsonl")
     return (epochs_hist, tour_hist, reward_hist, ploss_hist, aploss_hist,
             lr_hist, vloss_hist, ent_hist, eloss_hist,
-            gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist)
+            gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist, nu_hist)
 
 
 def _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
@@ -417,7 +418,7 @@ def main():
     )
 
     print("=" * 80)
-    print(f"  QAP-DRL Training — CVRP-{GRAPH_SIZE}  [v9 — Phase 1b + Changes 1+2]")
+    print(f"  QAP-DRL Training -- CVRP-{GRAPH_SIZE}  [Phase 2+: {AMP_DIM}D amplitudes]")
     print("=" * 80)
     print(f"  Graph size     : {GRAPH_SIZE}")
     print(f"  Capacity       : {CAPACITY}")
@@ -425,14 +426,17 @@ def main():
     print(f"  Batch size     : {BATCH_SIZE}")
     print(f"  Epochs         : {N_EPOCHS}")
     print(f"  Epoch size     : {EPOCH_SIZE:,}  ({BATCHES_PER_EPOCH} batches/epoch)")
-    print(f"  LR             : {LR} (cosine → 1e-5 over {TOTAL_OPT_STEPS:,} steps)")
+    print(f"  LR             : {LR} (warm restarts T0=50, T_mult=2, eta_min=1e-5)")
     print(f"  Entropy coef   : {ENTROPY_COEF}")
     print(f"  kNN k          : {KNN_K}")
-    print(f"  Eval aug       : ×{AUG_SAMPLES} stochastic samples, take best")
+    print(f"  Eval aug       : x{AUG_SAMPLES} coordinate augmentation + greedy")
+    print(f"  Amplitude dim  : {AMP_DIM}D (S{AMP_DIM-1} hypersphere)")
+    print(f"  Hidden dim     : {HIDDEN_DIM} (rotation MLP 5->{HIDDEN_DIM}->6)")
     print(f"  Parameters     : {n_params}")
-    print(f"  μ init         : {MU_INIT}  [C1: distance penalty, learnable]")
-    print(f"  ctx dim        : 6  [C2: +x_curr,y_curr in context vector]")
-    print(f"  Scoring        : q·ψ'j + λ·E_kNN(j) − μ·dist(vt,vj)  [C1+C2]")
+    print(f"  ctx dim        : {AMP_DIM+4}  [psi_curr({AMP_DIM})+cap+t+x+y]")
+    print(f"  mu init        : {MU_INIT}  [clamp 0-20, no weight_decay]")
+    print(f"  lambda clamp   : [-2, 3]")
+    print(f"  Scoring        : q*psi'j + lam*E_kNN(j) - mu*dist(vt,vj)")
     print(f"  Benchmark      : {ORTOOLS_REF:.4f}  ({ORTOOLS_SOURCE})")
     if device.type == "cuda":
         gpu = torch.cuda.get_device_name(0); vram = torch.cuda.get_device_properties(0).total_memory/1e9
@@ -445,18 +449,18 @@ def main():
 
     log_path = os.path.join(OUTPUT_DIR, "train_log.jsonl")
     fig_live, axes = plt.subplots(4, 2, figsize=(14, 16))
-    fig_live.suptitle(f"QAP-DRL Training — CVRP-{GRAPH_SIZE} [Phase 1b + C1+C2]", fontsize=14)
+    fig_live.suptitle(f"QAP-DRL Training -- CVRP-{GRAPH_SIZE} [Phase 2+: {AMP_DIM}D, h={HIDDEN_DIM}]", fontsize=14)
 
     if is_resume:
         (epochs_hist, tour_hist, reward_hist, ploss_hist, aploss_hist,
          lr_hist, vloss_hist, ent_hist, eloss_hist,
-         gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist) = _load_chart_history(log_path)
+         gnorm_hist, adv_hist, clip_hist, lam_hist, mu_hist, nu_hist) = _load_chart_history(log_path)
     else:
         epochs_hist = []; tour_hist  = []; reward_hist = []
         ploss_hist  = []; aploss_hist= []; lr_hist     = []
         vloss_hist  = []; ent_hist   = []; eloss_hist  = []
         gnorm_hist  = []; adv_hist   = []; clip_hist   = []
-        lam_hist    = []; mu_hist    = []  # (C1)
+        lam_hist    = []; mu_hist    = []; nu_hist    = []  # (C1)
 
     header = (
         f"{'Ep':>4} | {'val_tour':>8} | {'vs ORT':>7} | "
@@ -504,14 +508,15 @@ def main():
         avg_train_t = _avg(losses_list, "train_tour")
         avg_greedy  = _avg(losses_list, "greedy_tour")
         last_lambda = losses_list[-1]["lambda_val"]
-        last_mu     = losses_list[-1]["mu_val"]        # (C1)
+        last_mu     = losses_list[-1]["mu_val"]
+        last_nu     = losses_list[-1]["nu_val"]
         last_lr     = losses_list[-1]["lr"]
         avg_feas    = sum(feas_list) / len(feas_list)
         elapsed     = time.time() - t0
         vram        = torch.cuda.memory_allocated()/1e6 if torch.cuda.is_available() else 0.0
 
         val_tour    = evaluate_augmented(trainer.policy, val_instances, device,
-                                         n_samples=AUG_SAMPLES)
+                                         n_samples=AUG_SAMPLES, n_stochastic=0)
         val_gap_ort = 100.0 * (val_tour - ORTOOLS_REF) / ORTOOLS_REF
 
         trainer.logger.log_scalars({
@@ -530,7 +535,8 @@ def main():
             "ratio_mean":      avg_ratio,
             "adv_std":         avg_adv_std,
             "lambda_val":      last_lambda,
-            "mu_val":          last_mu,        # (C1)
+            "mu_val":          last_mu,
+            "nu_val":          last_nu,
             "lr":              last_lr,
             "feasibility":     avg_feas,
             "vram_mb":         vram,
@@ -556,7 +562,7 @@ def main():
             f"{epoch:4d} | {val_tour:8.4f} | {val_gap_ort:+6.1f}% | "
             f"{avg_ploss:8.3e} | {avg_vloss:8.3f} | {avg_ent:7.4f} | "
             f"{avg_gnorm:6.3f} | {avg_clip*100:4.1f}% | {avg_adv_std:7.4f} | "
-            f"{last_lambda:6.4f} | {last_mu:6.4f} | {avg_feas*100:4.1f}% | {elapsed:4.0f}s{marker}"
+            f"{last_lambda:6.4f} | {last_mu:6.4f} | {last_nu:6.4f} | {avg_feas*100:4.1f}% | {elapsed:4.0f}s{marker}"
         )
 
         epochs_hist.append(epoch);  tour_hist.append(val_tour)
@@ -568,7 +574,8 @@ def main():
         gnorm_hist.append(avg_gnorm);  adv_hist.append(avg_adv_std)
         clip_hist.append(avg_clip * 100.0)
         lam_hist.append(last_lambda)
-        mu_hist.append(last_mu)     # (C1)
+        mu_hist.append(last_mu)
+        nu_hist.append(last_nu)
 
         _draw_charts(axes, epochs_hist, tour_hist, reward_hist,
                      ploss_hist, aploss_hist, lr_hist,
@@ -651,7 +658,7 @@ def main():
 
     print()
     print("=" * 80)
-    print(f"  Training Complete — CVRP-{GRAPH_SIZE} [Phase 1b + Changes 1+2]")
+    print(f"  Training Complete -- CVRP-{GRAPH_SIZE} [Phase 2+: {AMP_DIM}D]")
     print("=" * 80)
     print(f"  Best epoch       : {best_epoch}")
     print(f"  Best tour length : {best_tour:.4f}  (augmented ×{AUG_SAMPLES})")
