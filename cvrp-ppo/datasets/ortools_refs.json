@@ -17,5 +17,24 @@
     "capacity": 30,
     "val_path": "C:\\Users\\ASUS\\Downloads\\Thesis Code QAP_VRP\\cvrp-ppo\\datasets\\val_n20.pkl",
     "method": "OR-Tools GLS (PATH_CHEAPEST_ARC + GUIDED_LOCAL_SEARCH)"
+  },
+  "100": {
+    "mean_tour": 16.686365,
+    "std_tour": 1.898724,
+    "p10": 14.3962,
+    "p25": 15.169,
+    "p50": 16.5944,
+    "p75": 17.9827,
+    "p90": 19.303,
+    "n_instances": 500,
+    "n_valid": 500,
+    "n_failed": 0,
+    "n_time_limited": 500,
+    "mean_solve_time": 5.005,
+    "max_solve_time": 5.032,
+    "time_limit_s": 5.0,
+    "capacity": 50,
+    "val_path": "C:\\Users\\ASUS\\Downloads\\Thesis Code QAP_VRP\\cvrp-ppo\\datasets\\val_n100.pkl",
+    "method": "OR-Tools GLS (PATH_CHEAPEST_ARC + GUIDED_LOCAL_SEARCH)"
   }
 }
